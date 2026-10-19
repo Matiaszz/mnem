@@ -1,7 +1,4 @@
 #include <iostream>
-#include <cstdint>
-#include <new>
-#include <cstring>
 #include "headers/SlabAllocator.h"
 #include "headers/FlatTable.h"
 

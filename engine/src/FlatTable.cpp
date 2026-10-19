@@ -1,8 +1,6 @@
 #include "headers/FlatTable.h"
-#include <cstddef>
-#include <cstdint>
 #include <string_view>
-#include <assert.h>
+#include <cassert>
 #include <cstring>
 
 using namespace std;
