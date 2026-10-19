@@ -42,7 +42,6 @@ namespace mnem::platform
             return true;
 
 #ifdef _WIN32
-        (void)size;
         return VirtualFree(memory, 0, MEM_RELEASE) != 0;
 #else
         return munmap(memory, size) == 0;

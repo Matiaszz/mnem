@@ -20,4 +20,5 @@ include_directories(src)
 
 add_executable(mnem
         src/main.cpp
-        src/SlabAllocator.cpp)
+        src/SlabAllocator.cpp
+        src/FlatTable.cpp)

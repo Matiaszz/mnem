@@ -1,7 +1,8 @@
-#include "SlabAllocator.h"
+#include "headers/SlabAllocator.h"
 #include "platform/mem_mapping.h"
 #include <cassert>
 #include <cstdint>
+#include <string_view>
 #include <new>
 
 using namespace mnem::platform;
