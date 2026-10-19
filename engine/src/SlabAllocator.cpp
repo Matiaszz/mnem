@@ -3,6 +3,7 @@
 #include <cassert>
 #include <string_view>
 #include <new> // throw
+#include <vector>
 
 using namespace mnem::platform;
 
@@ -12,8 +13,11 @@ size_t SlabAllocator::alignUp(size_t size, size_t alignment)
 }
 
 SlabAllocator::SlabAllocator(size_t requestedBlockSize, size_t capacityInBlocks)
-    : freeListHead(nullptr), allocatedBlocks(0)
+    : freeListHead(nullptr), allocatedBlocks(0), allocationMap(capacityInBlocks, 0)
 {
+    if (capacityInBlocks == 0)
+        throw std::bad_alloc();
+
     size_t minSize = sizeof(FreeNode);
     size_t actualSize = requestedBlockSize < minSize ? minSize : requestedBlockSize;
     blockSize = alignUp(actualSize, 64);
@@ -57,25 +61,63 @@ void *SlabAllocator::allocate()
 
     FreeNode *node = freeListHead;
     freeListHead = freeListHead->next;
-    allocatedBlocks++;
 
-    return static_cast<void *>(node);
+    size_t index = getPointerIndex(node);
+    assert(allocationMap[index] == 0 && "Pointer already allocated");
+
+    allocationMap[index] = 1;
+
+    ++allocatedBlocks;
+
+    return node;
 }
 
-void SlabAllocator::deallocate(void *ptr)
+size_t SlabAllocator::getPointerIndex(void *ptr)
+{
+    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+    uintptr_t poolStart = reinterpret_cast<uintptr_t>(memoryPool);
+
+    if (addr < poolStart || addr >= poolStart + slabSize)
+        return totalBlocks;
+
+    uintptr_t offset = addr - poolStart;
+
+    if (offset % blockSize != 0)
+        return totalBlocks;
+
+    return offset / blockSize;
+}
+
+bool SlabAllocator::deallocate(void *ptr)
 {
     if (!ptr)
-        return;
+        return false;
 
     uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
     uintptr_t poolStart = reinterpret_cast<uintptr_t>(memoryPool);
+
     uintptr_t poolEnd = poolStart + slabSize;
 
-    assert(addr >= poolStart && addr < poolEnd && "Ponteiro fora dos limites do Slab!");
-    assert((addr - poolStart) % blockSize == 0 && "Ponteiro desalinhado!");
+    if (addr < poolStart || addr >= poolStart + slabSize)
+        return false;
+
+    uintptr_t offset = addr - poolStart;
+    if (offset % blockSize != 0)
+        return false;
+
+    size_t index = offset / blockSize;
+
+    // Detecta double-free.
+    if (allocationMap[index] == 0)
+        return false;
+
+    allocationMap[index] = 0;
 
     FreeNode *node = static_cast<FreeNode *>(ptr);
+
     node->next = freeListHead;
     freeListHead = node;
-    allocatedBlocks--;
+    --allocatedBlocks;
+
+    return true;
 }

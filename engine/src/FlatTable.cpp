@@ -23,7 +23,7 @@ const bool Item::matches(string_view k) const
 FlatTable::FlatTable(size_t pow2Capacity, SlabAllocator &alloc)
     : capacity(pow2Capacity), mask(pow2Capacity - 1), activeCount(0), allocator(alloc)
 {
-    assert((pow2Capacity & (pow2Capacity - 1)) == 0 && "Capacity must be pow of 2");
+    assert(((pow2Capacity & (pow2Capacity - 1)) == 0 && pow2Capacity > 0) && "Capacity must be a non-zero power of 2");
     slots.resize(capacity, {0, nullptr, SlotState::EMPTY, {}});
 }
 
@@ -78,7 +78,7 @@ bool FlatTable::del(std::string_view key)
 
     for (size_t i = 0; i < capacity; ++i)
     {
-        const Slot &slot = slots[(idx + i) & mask];
+        Slot &slot = slots[(idx + i) & mask];
 
         if (slot.state == SlotState::EMPTY)
         {
@@ -87,9 +87,17 @@ bool FlatTable::del(std::string_view key)
 
         if (slot.state == SlotState::OCCUPIED && slot.hash == h)
         {
-            if (slot.item->matches(key))
+
+            if (slot.state == SlotState::OCCUPIED &&
+                slot.hash == h &&
+                slot.item->matches(key))
             {
                 allocator.deallocate(slot.item);
+
+                slot.item = nullptr;
+                slot.state = SlotState::TOMBSTONE;
+                --activeCount;
+
                 return true;
             }
         }
@@ -100,6 +108,12 @@ bool FlatTable::del(std::string_view key)
 
 bool FlatTable::set(string_view key, string_view val)
 {
+    if (key.size() > UINT16_MAX ||
+        val.size() > UINT16_MAX)
+    {
+        return false;
+    }
+
     size_t totalBytes = sizeof(Item) + key.size() + val.size();
     if (totalBytes > allocator.getBlockSize())
     {
@@ -119,8 +133,14 @@ bool FlatTable::set(string_view key, string_view val)
         {
             if (slot.hash == h && slot.item->matches(key))
             {
+                Item *newItem = writeItem(key, val);
+
+                if (!newItem)
+                    return false;
+
                 allocator.deallocate(slot.item);
-                slot.item = writeItem(key, val);
+                slot.item = newItem;
+
                 return true;
             }
         }

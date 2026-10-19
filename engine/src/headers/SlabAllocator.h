@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #ifndef MNEM_SLABALLOCATOR_H
 #define MNEM_SLABALLOCATOR_H
@@ -23,13 +24,15 @@ private:
     size_t allocatedBlocks;
 
     static size_t alignUp(size_t size, size_t alignment);
+    std::vector<uint8_t> allocationMap;
 
 public:
     SlabAllocator(size_t requestedBlockSize, size_t capacityInBlocks);
     ~SlabAllocator();
 
     void *allocate();
-    void deallocate(void *ptr);
+    bool deallocate(void *ptr);
+    size_t getPointerIndex(void *ptr);
 
     size_t getBlockSize() const { return blockSize; }
     size_t getTotalBlocks() const { return totalBlocks; }

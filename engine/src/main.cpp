@@ -1,6 +1,7 @@
 #include <iostream>
 #include "headers/SlabAllocator.h"
 #include "headers/FlatTable.h"
+#include <cassert>
 
 using namespace std;
 
@@ -30,14 +31,31 @@ int main()
     }
 
     // Remoção (DEL)
-    bool deleted = cache.del("metrics:db:query_ms");
-    cout << "DEL metrics:db:query_ms -> " << (deleted ? "OK" : "NOT_FOUND") << "\n";
+    // bool deleted = cache.del("metrics:db:query_ms");
+    // cout << "DEL metrics:db:query_ms -> " << (deleted ? "OK" : "NOT_FOUND") << "\n";
 
     // Confirmação de ausência
-    if (!cache.get("metrics:db:query_ms"))
+    auto data = cache.get("metrics:db:query_ms");
+    if (!data)
     {
         cout << "Chave removida com sucesso (TOMBSTONE processado).\n";
     }
+    else
+    {
+        cout << *data << '\n';
+    }
+
+    cout << "=== TESTES DE DOUBLE FREE ===";
+    void *a = slab128.allocate();
+    assert(a != nullptr);
+
+    assert(slab128.deallocate(a));  // true
+    assert(!slab128.deallocate(a)); // false: double-free
+
+    void *b = slab128.allocate();
+    // b pode reutilizar o endereço de a.
+    assert(b == a);
+    assert(slab128.deallocate(b));
 
     return 0;
 }
