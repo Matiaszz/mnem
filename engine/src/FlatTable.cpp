@@ -164,5 +164,18 @@ bool FlatTable::set(string_view key, string_view val)
         }
     }
 
+    if (firstTombstone != capacity)
+    {
+        Item *item = writeItem(key, val);
+
+        if (!item)
+            return false;
+
+        slots[firstTombstone] = {h, item, SlotState::OCCUPIED, {}};
+
+        ++activeCount;
+        return true;
+    }
+
     return false;
 }
