@@ -124,6 +124,7 @@ private:
     size_t activeCount;
     SlabAllocator &allocator;
 
+public:
     // FNV-1a Hash de 64 bits
     static uint64_t hashKey(std::string_view key)
     {
@@ -136,7 +137,6 @@ private:
         return hash;
     }
 
-public:
     FlatTable(size_t pow2Capacity, SlabAllocator &alloc);
 
     bool set(std::string_view key, const Value &val);
@@ -144,6 +144,11 @@ public:
     std::optional<ValueView> get(std::string_view key);
 
     bool del(std::string_view key);
+
+    size_t getActiveCount() const { return activeCount; }
+    size_t getCapacity() const { return capacity; }
+    SlotState getSlotState(size_t idx) const { return slots[idx].state; }
+    const Slot &getSlot(size_t idx) const { return slots[idx]; }
 
 private:
     Item *writeItem(std::string_view key, std::string_view val, ValueType type = ValueType::STRING);
