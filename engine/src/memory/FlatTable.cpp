@@ -2,6 +2,9 @@
 #include <string_view>
 #include <cassert>
 #include <cstring>
+#include <cstdint>
+#include <type_traits>
+#include <variant>
 
 using namespace std;
 
@@ -15,7 +18,7 @@ const char *Item::val() const
     return key() + keyLen;
 }
 
-const bool Item::matches(string_view k) const
+bool Item::matches(string_view k) const
 {
     return keyLen == k.size() && memcmp(key(), k.data(), k.size()) == 0;
 }
@@ -27,7 +30,7 @@ FlatTable::FlatTable(size_t pow2Capacity, SlabAllocator &alloc)
     slots.resize(capacity, {0, nullptr, SlotState::EMPTY, {}});
 }
 
-Item *FlatTable::writeItem(std::string_view key, std::string_view val)
+Item *FlatTable::writeItem(std::string_view key, std::string_view val, ValueType type)
 {
     void *rawMem = allocator.allocate();
     if (!rawMem)
@@ -36,6 +39,7 @@ Item *FlatTable::writeItem(std::string_view key, std::string_view val)
     Item *it = static_cast<Item *>(rawMem);
     it->keyLen = static_cast<uint16_t>(key.size());
     it->valLen = static_cast<uint16_t>(val.size());
+    it->type = type;
 
     char *payload = reinterpret_cast<char *>(it + 1);
     std::memcpy(payload, key.data(), key.size());
@@ -44,9 +48,8 @@ Item *FlatTable::writeItem(std::string_view key, std::string_view val)
     return it;
 }
 
-optional<string_view> FlatTable::get(string_view key)
+optional<ValueView> FlatTable::get(string_view key)
 {
-
     uint64_t h = hashKey(key);
     size_t idx = h & mask;
 
@@ -63,7 +66,10 @@ optional<string_view> FlatTable::get(string_view key)
         {
             if (slot.item->matches(key))
             {
-                return string_view(slot.item->val(), slot.item->valLen);
+                return ValueView{
+                    slot.item->type,
+                    std::string_view(slot.item->val(), slot.item->valLen)
+                };
             }
         }
     }
@@ -87,10 +93,7 @@ bool FlatTable::del(std::string_view key)
 
         if (slot.state == SlotState::OCCUPIED && slot.hash == h)
         {
-
-            if (slot.state == SlotState::OCCUPIED &&
-                slot.hash == h &&
-                slot.item->matches(key))
+            if (slot.item->matches(key))
             {
                 allocator.deallocate(slot.item);
 
@@ -106,15 +109,49 @@ bool FlatTable::del(std::string_view key)
     return false;
 }
 
-bool FlatTable::set(string_view key, string_view val)
+bool FlatTable::set(string_view key, const Value &val)
 {
-    if (key.size() > UINT16_MAX ||
-        val.size() > UINT16_MAX)
+    ValueType type = ValueType::STRING;
+    std::string_view valBytes;
+
+    std::visit([&](const auto &v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, std::int64_t>)
+        {
+            type = ValueType::INTEGER;
+            valBytes = std::string_view(reinterpret_cast<const char *>(&v), sizeof(v));
+        }
+        else if constexpr (std::is_same_v<T, double>)
+        {
+            type = ValueType::FLOAT;
+            valBytes = std::string_view(reinterpret_cast<const char *>(&v), sizeof(v));
+        }
+        else if constexpr (std::is_same_v<T, std::string_view>)
+        {
+            type = ValueType::STRING;
+            valBytes = v;
+        }
+        else if constexpr (std::is_same_v<T, Binary>)
+        {
+            type = ValueType::BINARY;
+            if (!v.empty())
+            {
+                valBytes = std::string_view(reinterpret_cast<const char *>(v.data()), v.size());
+            }
+        }
+        else if constexpr (std::is_same_v<T, Json>)
+        {
+            type = ValueType::JSON;
+            valBytes = v.data;
+        }
+    }, val);
+
+    if (key.size() > UINT16_MAX || valBytes.size() > UINT16_MAX)
     {
         return false;
     }
 
-    size_t totalBytes = sizeof(Item) + key.size() + val.size();
+    size_t totalBytes = sizeof(Item) + key.size() + valBytes.size();
     if (totalBytes > allocator.getBlockSize())
     {
         return false;
@@ -133,8 +170,7 @@ bool FlatTable::set(string_view key, string_view val)
         {
             if (slot.hash == h && slot.item->matches(key))
             {
-                Item *newItem = writeItem(key, val);
-
+                Item *newItem = writeItem(key, valBytes, type);
                 if (!newItem)
                     return false;
 
@@ -153,8 +189,8 @@ bool FlatTable::set(string_view key, string_view val)
         }
         else
         { // SlotState::EMPTY
-            size_t targetIdx = firstTombstone != capacity ? firstTombstone : probeIdx;
-            Item *newItem = writeItem(key, val);
+            size_t targetIdx = (firstTombstone != capacity) ? firstTombstone : probeIdx;
+            Item *newItem = writeItem(key, valBytes, type);
             if (!newItem)
                 return false; // Slab esgotado
 
@@ -166,13 +202,11 @@ bool FlatTable::set(string_view key, string_view val)
 
     if (firstTombstone != capacity)
     {
-        Item *item = writeItem(key, val);
-
-        if (!item)
+        Item *newItem = writeItem(key, valBytes, type);
+        if (!newItem)
             return false;
 
-        slots[firstTombstone] = {h, item, SlotState::OCCUPIED, {}};
-
+        slots[firstTombstone] = {h, newItem, SlotState::OCCUPIED, {}};
         ++activeCount;
         return true;
     }

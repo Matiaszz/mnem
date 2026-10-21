@@ -6,19 +6,98 @@
 #include "headers/SlabAllocator.h"
 #include <vector>
 #include <optional>
+#include <variant>
+#include <ostream>
+#include <cstring>
 
 #ifndef MNEM_FlatTable_H
 #define MNEM_FlatTable_H
+
+enum class ValueType : std::uint8_t
+{
+    STRING,
+    INTEGER,
+    FLOAT,
+    JSON,
+    BINARY
+};
 
 struct alignas(8) Item
 {
     uint16_t keyLen;
     uint16_t valLen;
+    ValueType type;
 
     const char *key() const;
     const char *val() const;
-    const bool matches(std::string_view k) const;
+    bool matches(std::string_view k) const;
 };
+
+using Binary = std::vector<std::uint8_t>;
+
+struct Json
+{
+    std::string_view data;
+};
+
+using Value = std::variant<
+    std::int64_t,
+    double,
+    std::string_view,
+    Binary,
+    Json
+>;
+
+struct ValueView
+{
+    ValueType type;
+    std::string_view bytes;
+
+    std::optional<std::int64_t> asInt() const
+    {
+        if (type == ValueType::INTEGER && bytes.size() == sizeof(std::int64_t))
+        {
+            std::int64_t v;
+            std::memcpy(&v, bytes.data(), sizeof(v));
+            return v;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<double> asFloat() const
+    {
+        if (type == ValueType::FLOAT && bytes.size() == sizeof(double))
+        {
+            double v;
+            std::memcpy(&v, bytes.data(), sizeof(v));
+            return v;
+        }
+        return std::nullopt;
+    }
+
+    std::string_view asString() const
+    {
+        return bytes;
+    }
+};
+
+inline std::ostream &operator<<(std::ostream &os, const ValueView &vv)
+{
+    switch (vv.type)
+    {
+    case ValueType::INTEGER:
+        if (auto v = vv.asInt())
+            return os << *v;
+        break;
+    case ValueType::FLOAT:
+        if (auto v = vv.asFloat())
+            return os << *v;
+        break;
+    default:
+        break;
+    }
+    return os << vv.bytes;
+}
 
 class FlatTable
 {
@@ -60,14 +139,14 @@ private:
 public:
     FlatTable(size_t pow2Capacity, SlabAllocator &alloc);
 
-    bool set(std::string_view key, std::string_view val);
+    bool set(std::string_view key, const Value &val);
 
-    std::optional<std::string_view> get(std::string_view key);
+    std::optional<ValueView> get(std::string_view key);
 
     bool del(std::string_view key);
 
 private:
-    Item *writeItem(std::string_view key, std::string_view val);
+    Item *writeItem(std::string_view key, std::string_view val, ValueType type = ValueType::STRING);
 };
 
 #endif // MNEM_FlatTable_H
