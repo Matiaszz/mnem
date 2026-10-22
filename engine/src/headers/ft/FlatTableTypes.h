@@ -3,16 +3,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
-#include "headers/SlabAllocator.h"
 #include <vector>
 #include <optional>
 #include <variant>
 #include <ostream>
 #include <cstring>
 
-#ifndef MNEM_FlatTable_H
-#define MNEM_FlatTable_H
+#ifndef MNEM_FLATTABLETYPES_H
+#define MNEM_FLATTABLETYPES_H
 
+// Tipos de dados suportados para os valores armazenados
 enum class ValueType : std::uint8_t
 {
     STRING,
@@ -22,16 +22,33 @@ enum class ValueType : std::uint8_t
     BINARY
 };
 
+// Estrutura de cabeçalho do item alocado no SlabAllocator.
+// Os bytes da chave e do valor ficam contíguos na memória imediatamente após este cabeçalho.
 struct alignas(8) Item
 {
-    uint16_t keyLen;
-    uint16_t valLen;
-    ValueType type;
+    uint16_t keyLen;      // Tamanho da chave em bytes
+    uint16_t valLen;      // Tamanho do valor em bytes
+    ValueType type;       // Tipo do dado armazenado
+    uint8_t padding[3];   // Alinhamento para múltiplos de 8 bytes
+    uint64_t expireAtMs;  // Timestamp de expiração em milissegundos (0 = sem expiração / infinito)
 
+    // Retorna ponteiro para o início da chave na memória
     const char *key() const;
+
+    // Retorna ponteiro para o início do valor na memória
     const char *val() const;
+
+    // Compara a chave do item com uma string_view
     bool matches(std::string_view k) const;
+
+    // Verifica se o item já expirou com base no tempo atual (nowMs)
+    bool isExpired(uint64_t nowMs) const
+    {
+        return expireAtMs != 0 && nowMs >= expireAtMs;
+    }
 };
+
+static_assert(sizeof(Item) == 16, "Item size must be 16 bytes");
 
 using Binary = std::vector<std::uint8_t>;
 
@@ -40,6 +57,7 @@ struct Json
     std::string_view data;
 };
 
+// Variante que encapsula qualquer um dos tipos de valores suportados
 using Value = std::variant<
     std::int64_t,
     double,
@@ -47,11 +65,13 @@ using Value = std::variant<
     Binary,
     Json>;
 
+// Visão leve e não proprietária dos dados do valor (zero-copy)
 struct ValueView
 {
     ValueType type;
     std::string_view bytes;
 
+    // Interpreta os bytes como inteiro de 64 bits se o tipo for compatível
     std::optional<std::int64_t> asInt() const
     {
         if (type == ValueType::INTEGER && bytes.size() == sizeof(std::int64_t))
@@ -63,6 +83,7 @@ struct ValueView
         return std::nullopt;
     }
 
+    // Interpreta os bytes como double se o tipo for compatível
     std::optional<double> asFloat() const
     {
         if (type == ValueType::FLOAT && bytes.size() == sizeof(double))
@@ -74,11 +95,13 @@ struct ValueView
         return std::nullopt;
     }
 
+    // Retorna a representação textual dos bytes
     std::string_view asString() const
     {
         return bytes;
     }
 
+    // Converte a ValueView de volta para a variante Value completa
     std::optional<Value> toValue() const
     {
         switch (type)
@@ -107,6 +130,7 @@ struct ValueView
     }
 };
 
+// Sobrecarga de operador para impressão facilitada da ValueView
 inline std::ostream &operator<<(std::ostream &os, const ValueView &vv)
 {
     switch (vv.type)
@@ -125,71 +149,4 @@ inline std::ostream &operator<<(std::ostream &os, const ValueView &vv)
     return os << vv.bytes;
 }
 
-class FlatTable
-{
-public:
-    enum class SlotState : uint8_t
-    {
-        EMPTY = 0,
-        OCCUPIED = 1,
-        TOMBSTONE = 2
-    };
-
-    struct Slot
-    {
-        uint64_t hash;
-        Item *item;
-        SlotState state;
-        uint8_t padding[7];
-    };
-
-private:
-    std::vector<Slot> slots;
-    size_t capacity;
-    size_t mask;
-    size_t activeCount;
-    SlabAllocator &allocator;
-
-public:
-    // FNV-1a Hash de 64 bits
-    static uint64_t hashKey(std::string_view key)
-    {
-        uint64_t hash = 14695981039346656037ULL;
-        for (char c : key)
-        {
-            hash ^= static_cast<uint8_t>(c);
-            hash *= 1099511628211ULL;
-        }
-        return hash;
-    }
-
-    FlatTable(size_t pow2Capacity, SlabAllocator &alloc);
-
-    bool set(std::string_view key, const Value &val);
-
-    std::optional<ValueView> get(std::string_view key);
-
-    bool rename(std::string_view key, std::string_view newKey, bool renameIfNotExist);
-
-    bool del(std::string_view key);
-
-    bool exists(std::string_view key);
-
-    std::optional<Value> getValueCopy(std::string_view key);
-
-    bool replaceKeyAtomically(
-        std::string_view key,
-        std::string_view newKey,
-        const Value &value,
-        bool onlyIfDestinationMissing);
-
-    size_t getActiveCount() const { return activeCount; }
-    size_t getCapacity() const { return capacity; }
-    SlotState getSlotState(size_t idx) const { return slots[idx].state; }
-    const Slot &getSlot(size_t idx) const { return slots[idx]; }
-
-private:
-    Item *writeItem(std::string_view key, std::string_view val, ValueType type = ValueType::STRING);
-};
-
-#endif // MNEM_FlatTable_H
+#endif // MNEM_FLATTABLETYPES_H

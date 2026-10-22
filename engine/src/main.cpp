@@ -5,6 +5,8 @@
 #include <cstring>
 #include <vector>
 #include <string>
+#include <thread>
+#include <chrono>
 
 using namespace std;
 
@@ -148,9 +150,172 @@ int main()
     assert(fullTable.get("item_overflow")->asInt() == 999);
     cout << "  -> Sucesso! item_overflow inserido reaproveitando o tombstone.\n";
 
+    // =========================================================================
+    // NOVOS TESTES: EXPIRE, PEXPIRE, TTL, PTTL, PERSIST E EXPIRAÇÃO PASSIVA/ATIVA
+    // =========================================================================
     cout << "\n========================================\n";
-    cout << "TODOS OS ASSERTIONS PASSARAM COM SUCESSO!\n";
+    cout << "TESTES DE EXPIRE, PEXPIRE E TTL\n";
     cout << "========================================\n";
+
+    SlabAllocator expireSlab(128, 100);
+    FlatTable expTable(16, expireSlab);
+    FlatTable::resetTimeOffset();
+
+    // [7] TTL de chave inexistente e chave sem expiração
+    cout << "\n[7] Verificando TTL/PTTL para chave inexistente e sem expiração...\n";
+    assert(expTable.ttl("nao_existe") == -2);
+    assert(expTable.pttl("nao_existe") == -2);
+
+    assert(expTable.set("persistente", "dados_duradouros"));
+    assert(expTable.ttl("persistente") == -1); // Sem timeout associado
+    assert(expTable.pttl("persistente") == -1);
+    cout << "  -> Chave inexistente retorna TTL = -2.\n";
+    cout << "  -> Chave sem timeout retorna TTL = -1.\n";
+
+    // [8] EXPIRE e TTL (em segundos)
+    cout << "\n[8] Testando comando EXPIRE e contagem regressiva de TTL...\n";
+    assert(expTable.set("sessao", "token_abc"));
+    assert(expTable.expire("sessao", 10)); // Expira em 10 segundos
+    assert(expTable.ttl("sessao") == 10);
+    assert(expTable.pttl("sessao") > 9000 && expTable.pttl("sessao") <= 10000);
+    cout << "  -> EXPIRE 'sessao' 10 definido. TTL inicial: " << expTable.ttl("sessao") << "s\n";
+
+    // Avança 4 segundos no relógio
+    FlatTable::advanceTimeMs(4000);
+    assert(expTable.ttl("sessao") == 6);
+    assert(expTable.get("sessao").has_value());
+    assert(expTable.get("sessao")->asString() == "token_abc");
+    cout << "  -> Após avançar 4s: TTL restante = " << expTable.ttl("sessao") << "s. Chave ainda válida.\n";
+
+    // Avança mais 7 segundos (total 11s decorridos > 10s timeout)
+    FlatTable::advanceTimeMs(7000);
+    assert(expTable.ttl("sessao") == -2); // Expirou!
+    assert(!expTable.get("sessao").has_value()); // Lazy deletion acionada no get
+    assert(!expTable.exists("sessao"));
+    assert(!expTable.del("sessao")); // Del em chave expirada retorna false
+    cout << "  -> Após expirar (11s decorridos): TTL = " << expTable.ttl("sessao")
+         << ", GET = nullopt, EXISTS = false, ativação removida da tabela.\n";
+
+    // [9] PEXPIRE e PTTL (em milissegundos) com teste em tempo real
+    cout << "\n[9] Testando comando PEXPIRE e PTTL (milissegundos) em tempo real...\n";
+    FlatTable::resetTimeOffset();
+    assert(expTable.set("cache_rapido", "valor_temporario"));
+    assert(expTable.pexpire("cache_rapido", 150)); // 150 ms
+    int64_t initialPttl = expTable.pttl("cache_rapido");
+    assert(initialPttl > 0 && initialPttl <= 150);
+    cout << "  -> PEXPIRE definido com 150ms. PTTL inicial: " << initialPttl << "ms\n";
+
+    // Pequena pausa na thread para medir tempo real decorrido
+    this_thread::sleep_for(chrono::milliseconds(25));
+    int64_t remainingPttl = expTable.pttl("cache_rapido");
+    assert(remainingPttl < initialPttl);
+    assert(remainingPttl > 0);
+    cout << "  -> Após sleep de 25ms: PTTL reduziu para " << remainingPttl << "ms.\n";
+
+    // Aguarda expiração completa em tempo real
+    this_thread::sleep_for(chrono::milliseconds(140));
+    assert(expTable.pttl("cache_rapido") == -2);
+    assert(expTable.ttl("cache_rapido") == -2);
+    assert(!expTable.get("cache_rapido").has_value());
+    cout << "  -> Após expiração em tempo real: PTTL = -2 e chave coletada com sucesso.\n";
+
+    // [10] Casos de borda: EXPIRE e PEXPIRE com tempo <= 0 (deleção imediata Redis)
+    cout << "\n[10] Testando EXPIRE/PEXPIRE com timeout <= 0 (deleção imediata padrão Redis)...\n";
+    assert(expTable.set("imediato_1", "sera_deletado"));
+    assert(expTable.expire("imediato_1", 0)); // TTL <= 0 deleta imediatamente e retorna true
+    assert(!expTable.exists("imediato_1"));
+    assert(expTable.ttl("imediato_1") == -2);
+
+    assert(expTable.set("imediato_2", "sera_deletado_negativo"));
+    assert(expTable.pexpire("imediato_2", -50)); // PTTL < 0 deleta imediatamente
+    assert(!expTable.exists("imediato_2"));
+    assert(expTable.ttl("imediato_2") == -2);
+
+    // Chamar em chave inexistente retorna false
+    assert(!expTable.expire("nao_existe_para_expire", 5));
+    assert(!expTable.pexpire("nao_existe_para_pexpire", 500));
+    cout << "  -> EXPIRE <= 0 e PEXPIRE <= 0 excluem chaves existentes e retornam true.\n";
+    cout << "  -> EXPIRE/PEXPIRE em chaves inexistentes retornam false.\n";
+
+    // [11] Comando PERSIST
+    cout << "\n[11] Testando comando PERSIST (remover timeout de chave)...\n";
+    assert(expTable.set("chave_com_timeout", "dado"));
+    assert(expTable.expire("chave_com_timeout", 50));
+    assert(expTable.ttl("chave_com_timeout") == 50);
+
+    assert(expTable.persist("chave_com_timeout")); // Remove TTL
+    assert(expTable.ttl("chave_com_timeout") == -1); // Volta a ser persistente
+    assert(!expTable.persist("chave_com_timeout")); // Segunda chamada retorna false (já não tem TTL)
+    assert(!expTable.persist("chave_inexistente")); // Chave inexistente retorna false
+
+    FlatTable::advanceTimeMs(60000); // Avança 60 segundos
+    assert(expTable.exists("chave_com_timeout")); // Continua existindo pois TTL foi removido!
+    assert(expTable.get("chave_com_timeout")->asString() == "dado");
+    cout << "  -> PERSIST removeu o TTL com sucesso; chave permanece intacta após o timeout original.\n";
+
+    // [12] Sobrescrita com SET limpa o TTL antigo (especificação Redis)
+    cout << "\n[12] Verificando que sobrescrever com SET limpa o TTL anterior (Redis spec)...\n";
+    assert(expTable.set("chave_sobrescrita", "antigo"));
+    assert(expTable.expire("chave_sobrescrita", 20));
+    assert(expTable.ttl("chave_sobrescrita") == 20);
+
+    assert(expTable.set("chave_sobrescrita", "novo_sem_ttl"));
+    assert(expTable.ttl("chave_sobrescrita") == -1); // TTL limpado!
+    assert(expTable.get("chave_sobrescrita")->asString() == "novo_sem_ttl");
+    cout << "  -> SET removeu o TTL anterior e atualizou o valor corretamente.\n";
+
+    // [13] SETEX e SETPX (atalhos atômicos com expiração)
+    cout << "\n[13] Testando SETEX e SETPX...\n";
+    assert(expTable.setEx("chave_setex", "valor_setex", 3));
+    assert(expTable.ttl("chave_setex") == 3);
+
+    assert(expTable.setPx("chave_setpx", "valor_setpx", 2500));
+    assert(expTable.pttl("chave_setpx") > 2000 && expTable.pttl("chave_setpx") <= 2500);
+    cout << "  -> SETEX e SETPX configurados com valores e TTLs atômicos.\n";
+
+    // [14] RENAME preservando TTL
+    cout << "\n[14] Testando RENAME com preservação de TTL...\n";
+    assert(expTable.set("origem", "dados_migracao"));
+    assert(expTable.expire("origem", 30));
+    FlatTable::advanceTimeMs(10000); // Passam 10 segundos (restando 20)
+    assert(expTable.ttl("origem") == 20);
+
+    assert(expTable.rename("origem", "destino", false));
+    assert(!expTable.exists("origem"));
+    assert(expTable.exists("destino"));
+    assert(expTable.ttl("destino") == 20); // TTL transferido para o novo nome!
+    assert(expTable.get("destino")->asString() == "dados_migracao");
+    cout << "  -> RENAME transferiu chave e preservou TTL restante (" << expTable.ttl("destino") << "s) com perfeição.\n";
+
+    // [15] Varredura ativa: purgeExpired()
+    cout << "\n[15] Testando limpeza ativa em lote com purgeExpired()...\n";
+    FlatTable purgeTable(16, expireSlab);
+    assert(purgeTable.set("exp_1", "a"));
+    assert(purgeTable.set("exp_2", "b"));
+    assert(purgeTable.set("exp_3", "c"));
+    assert(purgeTable.set("permanente_1", "d"));
+
+    assert(purgeTable.expire("exp_1", 2));
+    assert(purgeTable.expire("exp_2", 2));
+    assert(purgeTable.expire("exp_3", 2));
+
+    assert(purgeTable.getActiveCount() == 4);
+    FlatTable::advanceTimeMs(5000); // 5 segundos passam, exp_1, exp_2, exp_3 expiram
+
+    // Purge varre a tabela ativamente sem precisar de GET prévio
+    size_t purgedCount = purgeTable.purgeExpired();
+    assert(purgedCount == 3);
+    assert(purgeTable.getActiveCount() == 1);
+    assert(purgeTable.exists("permanente_1"));
+    assert(!purgeTable.exists("exp_1"));
+    assert(!purgeTable.exists("exp_2"));
+    assert(!purgeTable.exists("exp_3"));
+    cout << "  -> purgeExpired() coletou com sucesso 3 chaves expiradas em lote. activeCount atual: "
+         << purgeTable.getActiveCount() << "\n";
+
+    cout << "\n=======================================================\n";
+    cout << "TODOS OS TESTES (ORIGINAIS + NOVOS DE EXPIRAÇÃO) PASSARAM!\n";
+    cout << "=======================================================\n";
 
     return 0;
 }
