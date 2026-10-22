@@ -231,3 +231,75 @@ bool WriteOperation::replaceKeyAtomically(
 
     return true;
 }
+
+bool WriteOperation::increment(string_view key, uint64_t quantity)
+{
+    if (!table.exists(key))
+        return false;
+
+    auto view = table.get(key);
+    if (!view)
+        return false;
+
+    ValueType type = view->type;
+    if (type != ValueType::INTEGER && type != ValueType::FLOAT)
+        return false;
+
+    auto storedValue = table.getValueCopy(key);
+    if (!storedValue)
+        return false;
+
+    // Preserva o TTL existente da chave (especificação Redis)
+    size_t idx = table.findSlotIndex(key);
+    uint64_t keyExpireAtMs = (idx != table.capacity) ? table.slots[idx].item->expireAtMs : 0;
+
+    Value value;
+    if (type == ValueType::INTEGER)
+    {
+        int64_t currentValue = std::get<int64_t>(*storedValue);
+        value = currentValue + static_cast<int64_t>(quantity);
+    }
+    else
+    {
+        double currentValue = std::get<double>(*storedValue);
+        value = currentValue + static_cast<double>(quantity);
+    }
+
+    return set(key, value, keyExpireAtMs);
+}
+
+bool WriteOperation::decrement(string_view key, uint64_t quantity)
+{
+    if (!table.exists(key))
+        return false;
+
+    auto view = table.get(key);
+    if (!view)
+        return false;
+
+    ValueType type = view->type;
+    if (type != ValueType::INTEGER && type != ValueType::FLOAT)
+        return false;
+
+    auto storedValue = table.getValueCopy(key);
+    if (!storedValue)
+        return false;
+
+    // Preserva o TTL existente da chave (especificação Redis)
+    size_t idx = table.findSlotIndex(key);
+    uint64_t keyExpireAtMs = (idx != table.capacity) ? table.slots[idx].item->expireAtMs : 0;
+
+    Value value;
+    if (type == ValueType::INTEGER)
+    {
+        int64_t currentValue = std::get<int64_t>(*storedValue);
+        value = currentValue - static_cast<int64_t>(quantity);
+    }
+    else
+    {
+        double currentValue = std::get<double>(*storedValue);
+        value = currentValue - static_cast<double>(quantity);
+    }
+
+    return set(key, value, keyExpireAtMs);
+}

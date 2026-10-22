@@ -118,6 +118,9 @@ public:
         return writeOp.replaceKeyAtomically(key, newKey, value, onlyIfDestinationMissing, expireAtMs);
     }
 
+    bool increment(std::string_view key, uint64_t quantity = 1) { return writeOp.increment(key, quantity); }
+    bool decrement(std::string_view key, uint64_t quantity = 1) { return writeOp.decrement(key, quantity); }
+
     // ==========================================
     // Operações de TTL e Expiração (TTLOperation)
     // ==========================================

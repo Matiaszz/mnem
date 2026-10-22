@@ -21,7 +21,7 @@ include_directories(src)
 add_executable(mnem
         src/main.cpp
         src/memory/SlabAllocator.cpp
-        src/memory/FlatTable.cpp
-        src/memory/ReadOperation.cpp
-        src/memory/WriteOperation.cpp
-        src/memory/TTLOperation.cpp)
+        src/memory/ft/FlatTable.cpp
+        src/memory/ft/ReadOperation.cpp
+        src/memory/ft/WriteOperation.cpp
+        src/memory/ft/TTLOperation.cpp)

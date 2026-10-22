@@ -1,6 +1,6 @@
 #include <iostream>
 #include "headers/SlabAllocator.h"
-#include "headers/FlatTable.h"
+#include "headers/ft/FlatTable.h"
 #include <cassert>
 #include <cstring>
 #include <vector>
@@ -189,7 +189,7 @@ int main()
 
     // Avança mais 7 segundos (total 11s decorridos > 10s timeout)
     FlatTable::advanceTimeMs(7000);
-    assert(expTable.ttl("sessao") == -2); // Expirou!
+    assert(expTable.ttl("sessao") == -2);        // Expirou!
     assert(!expTable.get("sessao").has_value()); // Lazy deletion acionada no get
     assert(!expTable.exists("sessao"));
     assert(!expTable.del("sessao")); // Del em chave expirada retorna false
@@ -243,12 +243,12 @@ int main()
     assert(expTable.expire("chave_com_timeout", 50));
     assert(expTable.ttl("chave_com_timeout") == 50);
 
-    assert(expTable.persist("chave_com_timeout")); // Remove TTL
+    assert(expTable.persist("chave_com_timeout"));   // Remove TTL
     assert(expTable.ttl("chave_com_timeout") == -1); // Volta a ser persistente
-    assert(!expTable.persist("chave_com_timeout")); // Segunda chamada retorna false (já não tem TTL)
-    assert(!expTable.persist("chave_inexistente")); // Chave inexistente retorna false
+    assert(!expTable.persist("chave_com_timeout"));  // Segunda chamada retorna false (já não tem TTL)
+    assert(!expTable.persist("chave_inexistente"));  // Chave inexistente retorna false
 
-    FlatTable::advanceTimeMs(60000); // Avança 60 segundos
+    FlatTable::advanceTimeMs(60000);              // Avança 60 segundos
     assert(expTable.exists("chave_com_timeout")); // Continua existindo pois TTL foi removido!
     assert(expTable.get("chave_com_timeout")->asString() == "dado");
     cout << "  -> PERSIST removeu o TTL com sucesso; chave permanece intacta após o timeout original.\n";
@@ -313,6 +313,15 @@ int main()
     cout << "  -> purgeExpired() coletou com sucesso 3 chaves expiradas em lote. activeCount atual: "
          << purgeTable.getActiveCount() << "\n";
 
+    FlatTable incDecTable(16, expireSlab);
+    assert(incDecTable.set("incdec_1", 1));
+    assert(incDecTable.set("incdec_2", 3));
+    assert(incDecTable.increment("incdec_1"));
+    assert(incDecTable.decrement("incdec_2", 2));
+
+    cout << *incDecTable.get("incdec_1");
+    cout << '\n';
+    cout << *incDecTable.get("incdec_2");
     cout << "\n=======================================================\n";
     cout << "TODOS OS TESTES (ORIGINAIS + NOVOS DE EXPIRAÇÃO) PASSARAM!\n";
     cout << "=======================================================\n";

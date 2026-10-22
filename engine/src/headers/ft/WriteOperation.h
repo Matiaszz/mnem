@@ -41,6 +41,9 @@ public:
         const Value &value,
         bool onlyIfDestinationMissing,
         uint64_t expireAtMs = 0);
+
+    bool increment(std::string_view key, uint64_t quantity = 1);
+    bool decrement(std::string_view key, uint64_t quantity = 1);
 };
 
 #endif // MNEM_WRITEOPERATION_H
