@@ -7,6 +7,7 @@
 #include <optional>
 #include <chrono>
 #include <atomic>
+#include <memory>
 #include "headers/SlabAllocator.h"
 #include "headers/ft/FlatTableTypes.h"
 #include "headers/ft/ReadOperation.h"
@@ -43,6 +44,7 @@ private:
     size_t capacity;
     size_t mask;
     size_t activeCount;
+    std::unique_ptr<SlabAllocator> ownedAllocator;
     SlabAllocator &allocator;
     inline static std::atomic<int64_t> timeOffsetMs{0}; // Deslocamento de tempo para testes determinísticos
 
@@ -90,8 +92,14 @@ public:
         timeOffsetMs.store(0);
     }
 
-    // Construtor: inicializa a tabela com capacidade potência de 2 e vincula ao SlabAllocator
+    // Construtor autônomo: inicializa a tabela sem necessidade de fornecer um SlabAllocator externo.
+    // Cria e gerencia internamente sua própria instância de SlabAllocator com suporte a redimensionamento.
+    explicit FlatTable(size_t pow2Capacity = 1024, size_t slabBlockSize = 256);
+
+    // Construtor opcional com SlabAllocator compartilhado / externo
     FlatTable(size_t pow2Capacity, SlabAllocator &alloc);
+
+    ~FlatTable();
 
     // ==========================================
     // Operações de Leitura (ReadOperation)
@@ -137,6 +145,8 @@ public:
     ReadOperation &read() { return readOp; }
     WriteOperation &write() { return writeOp; }
     TTLOperation &ttlOps() { return ttlOp; }
+    SlabAllocator &getAllocator() { return allocator; }
+    const SlabAllocator &getAllocator() const { return allocator; }
 
     // Métodos utilitários de estado
     size_t getActiveCount() const { return activeCount; }

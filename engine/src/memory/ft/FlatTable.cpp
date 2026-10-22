@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstring>
 #include <cstdint>
+#include <memory>
 
 using namespace std;
 
@@ -24,13 +25,28 @@ bool Item::matches(string_view k) const
     return keyLen == k.size() && memcmp(key(), k.data(), k.size()) == 0;
 }
 
-// Construtor da tabela hash plana:
-// Inicializa os slots, registra o SlabAllocator e instancia os subsistemas de operações
-// (ReadOperation, WriteOperation, TTLOperation).
+// Construtor autônomo da tabela hash plana:
+// Cria e gerencia internamente sua própria instância de SlabAllocator com suporte a redimensionamento.
+FlatTable::FlatTable(size_t pow2Capacity, size_t slabBlockSize)
+    : capacity(pow2Capacity),
+      mask(pow2Capacity - 1),
+      activeCount(0),
+      ownedAllocator(make_unique<SlabAllocator>(slabBlockSize, pow2Capacity > 0 ? pow2Capacity : 1024)),
+      allocator(*ownedAllocator),
+      readOp(*this),
+      writeOp(*this),
+      ttlOp(*this)
+{
+    assert(((pow2Capacity & (pow2Capacity - 1)) == 0 && pow2Capacity > 0) && "Capacity must be a non-zero power of 2");
+    slots.resize(capacity, {0, nullptr, SlotState::EMPTY, {}});
+}
+
+// Construtor alternativo: vincula a uma instância externa de SlabAllocator
 FlatTable::FlatTable(size_t pow2Capacity, SlabAllocator &alloc)
     : capacity(pow2Capacity),
       mask(pow2Capacity - 1),
       activeCount(0),
+      ownedAllocator(nullptr),
       allocator(alloc),
       readOp(*this),
       writeOp(*this),
@@ -38,6 +54,18 @@ FlatTable::FlatTable(size_t pow2Capacity, SlabAllocator &alloc)
 {
     assert(((pow2Capacity & (pow2Capacity - 1)) == 0 && pow2Capacity > 0) && "Capacity must be a non-zero power of 2");
     slots.resize(capacity, {0, nullptr, SlotState::EMPTY, {}});
+}
+
+FlatTable::~FlatTable()
+{
+    for (size_t i = 0; i < capacity; ++i)
+    {
+        if (slots[i].state == SlotState::OCCUPIED && slots[i].item != nullptr)
+        {
+            allocator.deallocate(slots[i].item);
+            slots[i].item = nullptr;
+        }
+    }
 }
 
 // Escreve um item na memória alocada do Slab:

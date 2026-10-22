@@ -29,15 +29,77 @@ vector<string> findCollidingKeys(size_t capacity, size_t targetIdx, size_t count
 int main()
 {
     cout << "========================================\n";
-    cout << "TESTE DE COLISÕES, TOMBSTONES E CAPACIDADE\n";
+    cout << "TESTES DE REDIMENSIONAMENTO NO SLABALLOCATOR\n";
     cout << "========================================\n";
 
-    // Slab com blocos de 128 bytes
-    SlabAllocator slab(128, 100);
+    {
+        // 1. Cria um SlabAllocator com capacidade inicial pequena de apenas 3 blocos
+        cout << "[Slab 1] Inicializando SlabAllocator com capacidade de 3 blocos...\n";
+        SlabAllocator slab(128, 3, 2);
+        assert(slab.getTotalBlocks() == 3);
+        assert(slab.getAllocatedBlocks() == 0);
+        assert(slab.getFreeBlocks() == 3);
+        assert(slab.getChunkCount() == 1);
 
-    // Tabela com capacidade 8 (slots 0 a 7, máscara 7)
+        // Aloca os 3 blocos iniciais
+        void *p1 = slab.allocate();
+        void *p2 = slab.allocate();
+        void *p3 = slab.allocate();
+        assert(p1 && p2 && p3);
+        assert(slab.getAllocatedBlocks() == 3);
+        assert(slab.getFreeBlocks() == 0);
+        assert(slab.getChunkCount() == 1);
+        cout << "  -> 3 blocos alocados. Capacidade esgotada (freeBlocks = 0).\n";
+
+        // 2. Alocação além da capacidade: dispara estratégia de redimensionamento automático
+        cout << "[Slab 2] Alocando 4º bloco (dispara redimensionamento automático: 3 * 2 = 6 novos blocos)...\n";
+        void *p4 = slab.allocate();
+        assert(p4 != nullptr);
+        assert(slab.getChunkCount() == 2);
+        assert(slab.getTotalBlocks() == 9); // 3 + 6 = 9
+        assert(slab.getAllocatedBlocks() == 4);
+        assert(slab.getFreeBlocks() == 5);
+        cout << "  -> 4º bloco alocado! totalBlocks expandido para: " << slab.getTotalBlocks()
+             << ", Chunks ativos: " << slab.getChunkCount() << "\n";
+
+        // 3. Valida escrita e isolamento de memória nos diferentes chunks
+        memset(p1, 0xAA, 128);
+        memset(p4, 0xBB, 128);
+        assert(static_cast<uint8_t *>(p1)[0] == 0xAA);
+        assert(static_cast<uint8_t *>(p4)[0] == 0xBB);
+
+        // 4. Validação de índices globais
+        size_t idx1 = slab.getPointerIndex(p1);
+        size_t idx4 = slab.getPointerIndex(p4);
+        assert(idx1 < 3);
+        assert(idx4 >= 3 && idx4 < 9);
+
+        // 5. Desalocação entre múltiplos chunks e proteção contra double-free
+        assert(slab.deallocate(p4));
+        assert(slab.getAllocatedBlocks() == 3);
+        assert(slab.getFreeBlocks() == 6);
+        assert(!slab.deallocate(p4)); // double-free recusado
+
+        assert(slab.deallocate(p1));
+        assert(slab.deallocate(p2));
+        assert(slab.deallocate(p3));
+        assert(slab.getAllocatedBlocks() == 0);
+        assert(slab.getFreeBlocks() == 9);
+
+        // 6. Expansão manual via grow()
+        assert(slab.grow(10));
+        assert(slab.getTotalBlocks() == 19);
+        assert(slab.getChunkCount() == 3);
+        cout << "  -> Expansão manual via grow(10) validada. totalBlocks: " << slab.getTotalBlocks() << "\n";
+    }
+
+    cout << "\n========================================\n";
+    cout << "TESTE DE FLATTABLE SEM PASSAR SLABALLOCATOR\n";
+    cout << "========================================\n";
+
+    // Tabela autônoma com capacidade 8 e blocos de 128 bytes (SEM passar SlabAllocator!)
     const size_t CAP = 8;
-    FlatTable table(CAP, slab);
+    FlatTable table(CAP, 128);
 
     const size_t TARGET_SLOT = 2;
     vector<string> colKeys = findCollidingKeys(CAP, TARGET_SLOT, 4);
@@ -105,11 +167,10 @@ int main()
     assert(table.get(k2)->asString() == "valor_2_atualizado");
     cout << "  -> k2 atualizada para \"" << *table.get(k2) << "\". activeCount manteve-se em " << countAfter << ".\n";
 
-    // 6. Preencher todos os slots e verificar comportamento de tabela cheia
-    cout << "\n[6] Teste de tabela 100% cheia...\n";
-    SlabAllocator miniSlab(128, 50);
+    // 6. Preencher todos os slots e verificar comportamento de tabela cheia (sem passar allocator!)
+    cout << "\n[6] Teste de tabela 100% cheia (sem passar SlabAllocator)...\n";
     const size_t MINI_CAP = 4;
-    FlatTable fullTable(MINI_CAP, miniSlab);
+    FlatTable fullTable(MINI_CAP, 128);
 
     cout << "  -> Criando tabela com capacidade 4 e preenchendo todos os 4 slots...\n";
     assert(fullTable.set("item_0", 100));
@@ -151,14 +212,13 @@ int main()
     cout << "  -> Sucesso! item_overflow inserido reaproveitando o tombstone.\n";
 
     // =========================================================================
-    // NOVOS TESTES: EXPIRE, PEXPIRE, TTL, PTTL, PERSIST E EXPIRAÇÃO PASSIVA/ATIVA
+    // TESTES DE EXPIRE, PEXPIRE E TTL (SEM PASSAR SLABALLOCATOR)
     // =========================================================================
     cout << "\n========================================\n";
-    cout << "TESTES DE EXPIRE, PEXPIRE E TTL\n";
+    cout << "TESTES DE EXPIRE, PEXPIRE E TTL (SEM PASSAR SLABALLOCATOR)\n";
     cout << "========================================\n";
 
-    SlabAllocator expireSlab(128, 100);
-    FlatTable expTable(16, expireSlab);
+    FlatTable expTable(16);
     FlatTable::resetTimeOffset();
 
     // [7] TTL de chave inexistente e chave sem expiração
@@ -289,7 +349,7 @@ int main()
 
     // [15] Varredura ativa: purgeExpired()
     cout << "\n[15] Testando limpeza ativa em lote com purgeExpired()...\n";
-    FlatTable purgeTable(16, expireSlab);
+    FlatTable purgeTable(16);
     assert(purgeTable.set("exp_1", "a"));
     assert(purgeTable.set("exp_2", "b"));
     assert(purgeTable.set("exp_3", "c"));
@@ -313,17 +373,17 @@ int main()
     cout << "  -> purgeExpired() coletou com sucesso 3 chaves expiradas em lote. activeCount atual: "
          << purgeTable.getActiveCount() << "\n";
 
-    FlatTable incDecTable(16, expireSlab);
+    FlatTable incDecTable(16);
     assert(incDecTable.set("incdec_1", 1));
     assert(incDecTable.set("incdec_2", 3));
     assert(incDecTable.increment("incdec_1"));
     assert(incDecTable.decrement("incdec_2", 2));
 
-    cout << *incDecTable.get("incdec_1");
-    cout << '\n';
-    cout << *incDecTable.get("incdec_2");
+    assert(incDecTable.get("incdec_1")->asInt() == 2);
+    assert(incDecTable.get("incdec_2")->asInt() == 1);
+
     cout << "\n=======================================================\n";
-    cout << "TODOS OS TESTES (ORIGINAIS + NOVOS DE EXPIRAÇÃO) PASSARAM!\n";
+    cout << "TODOS OS TESTES (SLAB REDIMENSIONAMENTO + FLATTABLE AUTÔNOMA) PASSARAM!\n";
     cout << "=======================================================\n";
 
     return 0;
