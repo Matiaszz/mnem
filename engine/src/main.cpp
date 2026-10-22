@@ -1,6 +1,7 @@
 #include <iostream>
 #include "headers/SlabAllocator.h"
 #include "headers/ft/FlatTable.h"
+#include "headers/network/Server.h"
 #include <cassert>
 #include <cstring>
 #include <vector>
@@ -26,7 +27,7 @@ vector<string> findCollidingKeys(size_t capacity, size_t targetIdx, size_t count
     return keys;
 }
 
-int main()
+static void runInternalTests()
 {
     cout << "========================================\n";
     cout << "TESTES DE REDIMENSIONAMENTO NO SLABALLOCATOR\n";
@@ -279,8 +280,8 @@ int main()
     assert(!expTable.get("cache_rapido").has_value());
     cout << "  -> Após expiração em tempo real: PTTL = -2 e chave coletada com sucesso.\n";
 
-    // [10] Casos de borda: EXPIRE e PEXPIRE com tempo <= 0 (deleção imediata Redis)
-    cout << "\n[10] Testando EXPIRE/PEXPIRE com timeout <= 0 (deleção imediata padrão Redis)...\n";
+    // [10] Casos de borda: EXPIRE e PEXPIRE com tempo <= 0 (deleção imediata)
+    cout << "\n[10] Testando EXPIRE/PEXPIRE com timeout <= 0 (deleção imediata)...\n";
     assert(expTable.set("imediato_1", "sera_deletado"));
     assert(expTable.expire("imediato_1", 0)); // TTL <= 0 deleta imediatamente e retorna true
     assert(!expTable.exists("imediato_1"));
@@ -313,8 +314,8 @@ int main()
     assert(expTable.get("chave_com_timeout")->asString() == "dado");
     cout << "  -> PERSIST removeu o TTL com sucesso; chave permanece intacta após o timeout original.\n";
 
-    // [12] Sobrescrita com SET limpa o TTL antigo (especificação Redis)
-    cout << "\n[12] Verificando que sobrescrever com SET limpa o TTL anterior (Redis spec)...\n";
+    // [12] Sobrescrita com SET limpa o TTL antigo
+    cout << "\n[12] Verificando que sobrescrever com SET limpa o TTL anterior...\n";
     assert(expTable.set("chave_sobrescrita", "antigo"));
     assert(expTable.expire("chave_sobrescrita", 20));
     assert(expTable.ttl("chave_sobrescrita") == 20);
@@ -385,6 +386,44 @@ int main()
     cout << "\n=======================================================\n";
     cout << "TODOS OS TESTES (SLAB REDIMENSIONAMENTO + FLATTABLE AUTÔNOMA) PASSARAM!\n";
     cout << "=======================================================\n";
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc > 1 && string(argv[1]) == "--test")
+    {
+        runInternalTests();
+        return 0;
+    }
+
+    int port = 6379;
+    string host = "127.0.0.1";
+
+    if (argc > 1)
+    {
+        try
+        {
+            port = stoi(argv[1]);
+        }
+        catch (...)
+        {
+            cerr << "[Main] Porta informada (" << argv[1] << ") invalida, utilizando padrao " << port << ".\n";
+        }
+    }
+
+    if (argc > 2)
+    {
+        host = argv[2];
+    }
+
+    FlatTable table(1024, 256);
+    Server server(table, port, host);
+
+    if (!server.start())
+    {
+        cerr << "[Main] Erro ao iniciar servidor no endereco " << host << ":" << port << "\n";
+        return 1;
+    }
 
     return 0;
 }

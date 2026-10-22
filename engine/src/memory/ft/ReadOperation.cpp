@@ -9,7 +9,7 @@ ReadOperation::ReadOperation(FlatTable &tbl)
 {
 }
 
-// Busca o valor de uma chave (Comando GET do Redis):
+// Busca o valor de uma chave (Comando GET):
 // 1. Procura o slot da chave via sondagem linear (findSlotIndex).
 // 2. Se encontrada, verifica se expirou (now >= expireAtMs).
 // 3. Se expirada, realiza a expiração passiva (lazy deletion) via deleteSlot e retorna nullopt.
@@ -36,7 +36,7 @@ optional<ValueView> ReadOperation::get(string_view key)
         string_view(slot.item->val(), slot.item->valLen)};
 }
 
-// Verifica se a chave existe e não está expirada (Comando EXISTS do Redis)
+// Verifica se a chave existe e não está expirada (Comando EXISTS)
 bool ReadOperation::exists(string_view key)
 {
     return get(key).has_value();

@@ -24,4 +24,7 @@ add_executable(mnem
         src/memory/ft/FlatTable.cpp
         src/memory/ft/ReadOperation.cpp
         src/memory/ft/WriteOperation.cpp
-        src/memory/ft/TTLOperation.cpp)
+        src/memory/ft/TTLOperation.cpp
+        src/network/Protocol.cpp
+        src/network/CommandHandler.cpp
+        src/network/Server.cpp)

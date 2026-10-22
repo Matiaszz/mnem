@@ -9,7 +9,7 @@ TTLOperation::TTLOperation(FlatTable &tbl)
 {
 }
 
-// Define timeout em segundos para uma chave (Comando EXPIRE do Redis):
+// Define timeout em segundos para uma chave (Comando EXPIRE):
 // Converte os segundos em milissegundos e delega para pexpire.
 bool TTLOperation::expire(string_view key, int64_t seconds)
 {
@@ -24,9 +24,9 @@ bool TTLOperation::expire(string_view key, int64_t seconds)
     return pexpire(key, seconds * 1000);
 }
 
-// Define timeout em milissegundos para uma chave (Comando PEXPIRE do Redis):
+// Define timeout em milissegundos para uma chave (Comando PEXPIRE):
 // - Se a chave não existir ou estiver expirada, retorna false.
-// - Se milliseconds <= 0, remove a chave imediatamente e retorna true (padrão Redis).
+// - Se milliseconds <= 0, remove a chave imediatamente e retorna true.
 // - Caso contrário, armazena no Item o timestamp absoluto de expiração (now + milliseconds).
 bool TTLOperation::pexpire(string_view key, int64_t milliseconds)
 {
@@ -91,7 +91,7 @@ bool TTLOperation::pexpireAt(string_view key, uint64_t unixTimeMs)
     return true;
 }
 
-// Consulta o tempo de vida restante em segundos (Comando TTL do Redis):
+// Consulta o tempo de vida restante em segundos (Comando TTL):
 // Obtém o valor em milissegundos via pttl e converte arredondando para cima,
 // assegurando que a chave não retorne 0 enquanto ainda estiver viva.
 int64_t TTLOperation::ttl(string_view key)
@@ -104,7 +104,7 @@ int64_t TTLOperation::ttl(string_view key)
     return (ms + 999) / 1000;
 }
 
-// Consulta o tempo de vida restante em milissegundos (Comando PTTL do Redis):
+// Consulta o tempo de vida restante em milissegundos (Comando PTTL):
 // - Retorna -2 se a chave não existir ou tiver expirado (aciona lazy deletion).
 // - Retorna -1 se a chave existir mas for permanente (expireAtMs == 0).
 // - Retorna os milissegundos restantes (expireAtMs - now).
@@ -132,7 +132,7 @@ int64_t TTLOperation::pttl(string_view key)
     return static_cast<int64_t>(slot.item->expireAtMs - now);
 }
 
-// Remove o tempo de vida da chave, tornando-a persistente (Comando PERSIST do Redis):
+// Remove o tempo de vida da chave, tornando-a persistente (Comando PERSIST):
 // Retorna true se a chave possuía um timeout e foi resetada; false caso contrário.
 bool TTLOperation::persist(string_view key)
 {

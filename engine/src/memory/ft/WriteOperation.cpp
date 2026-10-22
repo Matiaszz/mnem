@@ -11,7 +11,7 @@ WriteOperation::WriteOperation(FlatTable &tbl)
 {
 }
 
-// Insere ou atualiza uma chave na tabela (Comando SET do Redis):
+// Insere ou atualiza uma chave na tabela (Comando SET):
 // 1. Extrai a representação em bytes do tipo Value (variant).
 // 2. Se a chave já existir (slot OCCUPIED com mesma chave), substitui o item na mesma posição.
 // 3. Se for uma nova inserção, reutiliza o primeiro TOMBSTONE encontrado durante a sondagem
@@ -146,8 +146,8 @@ bool WriteOperation::setPx(string_view key, const Value &val, int64_t millisecon
     return set(key, val, now + static_cast<uint64_t>(milliseconds));
 }
 
-// Exclui uma chave explicitamente (Comando DEL do Redis):
-// Se a chave já estiver expirada, limpa o slot e retorna false (no Redis, DEL de chave expirada retorna 0).
+// Exclui uma chave explicitamente (Comando DEL):
+// Se a chave já estiver expirada, limpa o slot e retorna false (DEL de chave expirada retorna 0).
 // Se estiver ativa, remove o slot e retorna true.
 bool WriteOperation::del(string_view key)
 {
@@ -169,7 +169,7 @@ bool WriteOperation::del(string_view key)
     return true;
 }
 
-// Renomeia 'key' para 'newKey' (Comando RENAME / RENAMENX do Redis):
+// Renomeia 'key' para 'newKey' (Comando RENAME / RENAMENX):
 // Preserva tanto o valor quanto o TTL restante da chave original no novo nome.
 bool WriteOperation::rename(
     string_view key,
@@ -249,7 +249,7 @@ bool WriteOperation::increment(string_view key, uint64_t quantity)
     if (!storedValue)
         return false;
 
-    // Preserva o TTL existente da chave (especificação Redis)
+    // Preserva o TTL existente da chave
     size_t idx = table.findSlotIndex(key);
     uint64_t keyExpireAtMs = (idx != table.capacity) ? table.slots[idx].item->expireAtMs : 0;
 
@@ -285,7 +285,7 @@ bool WriteOperation::decrement(string_view key, uint64_t quantity)
     if (!storedValue)
         return false;
 
-    // Preserva o TTL existente da chave (especificação Redis)
+    // Preserva o TTL existente da chave
     size_t idx = table.findSlotIndex(key);
     uint64_t keyExpireAtMs = (idx != table.capacity) ? table.slots[idx].item->expireAtMs : 0;
 

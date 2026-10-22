@@ -19,13 +19,13 @@ public:
     explicit WriteOperation(FlatTable &tbl);
 
     // Insere ou atualiza uma chave com um valor e opcionalmente um timestamp de expiração (em ms).
-    // Nota: ao atualizar uma chave existente sem informar expireAtMs, qualquer TTL prévio é resetado (padrão Redis).
+    // Nota: ao atualizar uma chave existente sem informar expireAtMs, qualquer TTL prévio é resetado.
     bool set(std::string_view key, const Value &val, uint64_t expireAtMs = 0);
 
-    // Define chave com expiração em segundos de forma atômica (estilo Redis SETEX)
+    // Define chave com expiração em segundos de forma atômica (SETEX)
     bool setEx(std::string_view key, const Value &val, int64_t seconds);
 
-    // Define chave com expiração em milissegundos de forma atômica (estilo Redis PSETEX)
+    // Define chave com expiração em milissegundos de forma atômica (PSETEX)
     bool setPx(std::string_view key, const Value &val, int64_t milliseconds);
 
     // Remove uma chave da tabela e devolve a memória ao SlabAllocator
