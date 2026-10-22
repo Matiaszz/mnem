@@ -45,8 +45,7 @@ using Value = std::variant<
     double,
     std::string_view,
     Binary,
-    Json
->;
+    Json>;
 
 struct ValueView
 {
@@ -78,6 +77,33 @@ struct ValueView
     std::string_view asString() const
     {
         return bytes;
+    }
+
+    std::optional<Value> toValue() const
+    {
+        switch (type)
+        {
+        case ValueType::INTEGER:
+            if (auto v = asInt())
+                return Value{*v};
+            break;
+
+        case ValueType::FLOAT:
+            if (auto v = asFloat())
+                return Value{*v};
+            break;
+
+        case ValueType::STRING:
+            return Value{bytes};
+
+        case ValueType::JSON:
+            return Value{Json{bytes}};
+
+        case ValueType::BINARY:
+            return Value{Binary(bytes.begin(), bytes.end())};
+        }
+
+        return std::nullopt;
     }
 };
 
@@ -143,7 +169,19 @@ public:
 
     std::optional<ValueView> get(std::string_view key);
 
+    bool rename(std::string_view key, std::string_view newKey, bool renameIfNotExist);
+
     bool del(std::string_view key);
+
+    bool exists(std::string_view key);
+
+    std::optional<Value> getValueCopy(std::string_view key);
+
+    bool replaceKeyAtomically(
+        std::string_view key,
+        std::string_view newKey,
+        const Value &value,
+        bool onlyIfDestinationMissing);
 
     size_t getActiveCount() const { return activeCount; }
     size_t getCapacity() const { return capacity; }

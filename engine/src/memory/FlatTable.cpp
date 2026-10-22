@@ -30,7 +30,7 @@ FlatTable::FlatTable(size_t pow2Capacity, SlabAllocator &alloc)
     slots.resize(capacity, {0, nullptr, SlotState::EMPTY, {}});
 }
 
-Item *FlatTable::writeItem(std::string_view key, std::string_view val, ValueType type)
+Item *FlatTable::writeItem(string_view key, string_view val, ValueType type)
 {
     void *rawMem = allocator.allocate();
     if (!rawMem)
@@ -42,8 +42,8 @@ Item *FlatTable::writeItem(std::string_view key, std::string_view val, ValueType
     it->type = type;
 
     char *payload = reinterpret_cast<char *>(it + 1);
-    std::memcpy(payload, key.data(), key.size());
-    std::memcpy(payload + key.size(), val.data(), val.size());
+    memcpy(payload, key.data(), key.size());
+    memcpy(payload + key.size(), val.data(), val.size());
 
     return it;
 }
@@ -68,8 +68,7 @@ optional<ValueView> FlatTable::get(string_view key)
             {
                 return ValueView{
                     slot.item->type,
-                    std::string_view(slot.item->val(), slot.item->valLen)
-                };
+                    string_view(slot.item->val(), slot.item->valLen)};
             }
         }
     }
@@ -77,7 +76,7 @@ optional<ValueView> FlatTable::get(string_view key)
     return nullopt;
 }
 
-bool FlatTable::del(std::string_view key)
+bool FlatTable::del(string_view key)
 {
     uint64_t h = hashKey(key);
     size_t idx = h & mask;
@@ -112,39 +111,39 @@ bool FlatTable::del(std::string_view key)
 bool FlatTable::set(string_view key, const Value &val)
 {
     ValueType type = ValueType::STRING;
-    std::string_view valBytes;
+    string_view valBytes;
 
-    std::visit([&](const auto &v) {
-        using T = std::decay_t<decltype(v)>;
-        if constexpr (std::is_same_v<T, std::int64_t>)
+    visit([&](const auto &v)
+          {
+        using T = decay_t<decltype(v)>;
+        if constexpr (is_same_v<T, int64_t>)
         {
             type = ValueType::INTEGER;
-            valBytes = std::string_view(reinterpret_cast<const char *>(&v), sizeof(v));
+            valBytes = string_view(reinterpret_cast<const char *>(&v), sizeof(v));
         }
-        else if constexpr (std::is_same_v<T, double>)
+        else if constexpr (is_same_v<T, double>)
         {
             type = ValueType::FLOAT;
-            valBytes = std::string_view(reinterpret_cast<const char *>(&v), sizeof(v));
+            valBytes = string_view(reinterpret_cast<const char *>(&v), sizeof(v));
         }
-        else if constexpr (std::is_same_v<T, std::string_view>)
+        else if constexpr (is_same_v<T, string_view>)
         {
             type = ValueType::STRING;
             valBytes = v;
         }
-        else if constexpr (std::is_same_v<T, Binary>)
+        else if constexpr (is_same_v<T, Binary>)
         {
             type = ValueType::BINARY;
             if (!v.empty())
             {
-                valBytes = std::string_view(reinterpret_cast<const char *>(v.data()), v.size());
+                valBytes = string_view(reinterpret_cast<const char *>(v.data()), v.size());
             }
         }
-        else if constexpr (std::is_same_v<T, Json>)
+        else if constexpr (is_same_v<T, Json>)
         {
             type = ValueType::JSON;
             valBytes = v.data;
-        }
-    }, val);
+        } }, val);
 
     if (key.size() > UINT16_MAX || valBytes.size() > UINT16_MAX)
     {
@@ -212,4 +211,64 @@ bool FlatTable::set(string_view key, const Value &val)
     }
 
     return false;
+}
+
+bool FlatTable::rename(
+    std::string_view key,
+    std::string_view newKey,
+    bool renameIfNotExist)
+{
+    if (key == newKey)
+        return exists(key);
+
+    auto value = getValueCopy(key);
+
+    if (!value)
+        return false;
+
+    return replaceKeyAtomically(
+        key,
+        newKey,
+        *value,
+        renameIfNotExist);
+}
+
+bool FlatTable::exists(std::string_view key)
+{
+    return get(key).has_value();
+}
+
+std::optional<Value> FlatTable::getValueCopy(std::string_view key)
+{
+    auto view = get(key);
+
+    if (!view)
+        return std::nullopt;
+
+    return view->toValue();
+}
+
+bool FlatTable::replaceKeyAtomically(
+    std::string_view key,
+    std::string_view newKey,
+    const Value &value,
+    bool onlyIfDestinationMissing)
+{
+    if (key == newKey)
+        return exists(key);
+
+    if (onlyIfDestinationMissing && exists(newKey))
+        return false;
+
+    // Primeiro grava o destino. Se falhar, a origem permanece.
+    if (!set(newKey, value))
+        return false;
+
+    // A origem só é removida após a gravação bem-sucedida.
+    if (!del(key))
+    {
+        return false;
+    }
+
+    return true;
 }
