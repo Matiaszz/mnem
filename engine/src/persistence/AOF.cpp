@@ -4,7 +4,8 @@ using namespace std;
 
 AOF::AOF(const string &path)
     : filePath(path),
-      fileStream(path, ios::out | ios::app | ios::binary)
+      fileStream(path, ios::out | ios::app | ios::binary),
+      enabled(true)
 {
 }
 
@@ -19,7 +20,8 @@ AOF::~AOF()
 
 AOF::AOF(AOF &&other) noexcept
     : filePath(std::move(other.filePath)),
-      fileStream(std::move(other.fileStream))
+      fileStream(std::move(other.fileStream)),
+      enabled(other.enabled)
 {
 }
 
@@ -34,12 +36,18 @@ AOF &AOF::operator=(AOF &&other) noexcept
         }
         filePath = std::move(other.filePath);
         fileStream = std::move(other.fileStream);
+        enabled = other.enabled;
     }
     return *this;
 }
 
 bool AOF::append(string_view operation)
 {
+    if (!enabled)
+    {
+        return true;
+    }
+
     if (operation.empty())
     {
         return false;

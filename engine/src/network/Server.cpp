@@ -51,6 +51,23 @@ bool Server::start()
 
     setupSignals();
 
+    // 1. Carrega o Dump salvo em disco (se existir)
+    if (table.loadDump())
+    {
+        cout << "[Server] Dump carregado com sucesso (" << table.getActiveCount() << " chaves restauradas).\n";
+    }
+
+    // 2. Executa os comandos pendentes no AOF (caso houver)
+    size_t replayed = commandHandler.replayAof();
+    if (replayed > 0)
+    {
+        cout << "[Server] AOF processado (" << replayed << " comandos reexecutados, "
+             << table.getActiveCount() << " chaves ativas).\n";
+    }
+
+    // 3. Limpa o AOF após carregar o estado inicial
+    table.clearAof();
+
     if (!init_network())
     {
         cerr << "[Server] Erro ao inicializar subsistema de rede.\n";
@@ -76,6 +93,7 @@ bool Server::start()
     cout << "=========================================================\n";
     cout << "  MNEM In-Memory Storage Server iniciado com sucesso!\n";
     cout << "  Escutando em: " << host << ":" << port << "\n";
+    cout << "  Chaves ativas em memoria: " << table.getActiveCount() << "\n";
     cout << "  Aguardando conexoes... (Pressione Ctrl+C para encerrar)\n";
     cout << "=========================================================\n";
 
@@ -133,6 +151,12 @@ void Server::stop()
     if (!running.exchange(false))
     {
         return;
+    }
+
+    cout << "\n[Server] Salvando dump de memoria e limpando AOF...\n";
+    if (table.dump())
+    {
+        cout << "[Server] Dump salvo com sucesso.\n";
     }
 
     connectionManager.closeAll();

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <memory>
 #include "headers/SlabAllocator.h"
+#include "headers/Dump.h"
 #include "headers/ft/FlatTableTypes.h"
 #include "headers/ft/ReadOperation.h"
 #include "headers/ft/WriteOperation.h"
@@ -48,10 +49,11 @@ private:
     SlabAllocator &allocator;
     inline static std::atomic<int64_t> timeOffsetMs{0}; // Deslocamento de tempo para testes determinísticos
 
-    // Submódulos de operações especializadas
+    // Submódulos de operações especializadas e persistência
     ReadOperation readOp;
     WriteOperation writeOp;
     TTLOperation ttlOp;
+    Dump dumpManager;
 
     friend class ReadOperation;
     friend class WriteOperation;
@@ -141,12 +143,33 @@ public:
     bool pexpireAt(std::string_view key, uint64_t unixTimeMs) { return ttlOp.pexpireAt(key, unixTimeMs); }
     size_t purgeExpired() { return ttlOp.purgeExpired(); }
 
+    // ==========================================
+    // Persistência (Dump + AOF)
+    // ==========================================
+    // Gera um dump de todos os itens da memória e limpa o arquivo AOF em seguida
+    bool dump()
+    {
+        if (!dumpManager.save(*this))
+        {
+            return false;
+        }
+        return writeOp.clearAof();
+    }
+
+    // Carrega os itens salvos no arquivo de dump para a memória
+    bool loadDump()
+    {
+        return dumpManager.load(*this);
+    }
+
     // Acesso direto aos subsistemas de operações
     ReadOperation &read() { return readOp; }
     WriteOperation &write() { return writeOp; }
     TTLOperation &ttlOps() { return ttlOp; }
     AOF &getAof() { return writeOp.getAof(); }
+    const AOF &getAof() const { return writeOp.getAof(); }
     bool clearAof() { return writeOp.clearAof(); }
+    Dump &getDumpManager() { return dumpManager; }
     SlabAllocator &getAllocator() { return allocator; }
     const SlabAllocator &getAllocator() const { return allocator; }
 

@@ -29,7 +29,8 @@ add_executable(mnem
         src/network/CommandHandler.cpp
         src/network/ConnectionManager.cpp
         src/network/Server.cpp
-        src/persistence/AOF.cpp)
+        src/persistence/AOF.cpp
+        src/persistence/Dump.cpp)
 
 if(WIN32)
     target_link_libraries(mnem PRIVATE ws2_32)

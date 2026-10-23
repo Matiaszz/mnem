@@ -37,6 +37,12 @@ public:
     // Nota: ao atualizar uma chave existente sem informar expireAtMs, qualquer TTL prévio é resetado.
     bool set(std::string_view key, const Value &val, uint64_t expireAtMs = 0);
 
+    // Restaura diretamente uma chave e valor na memória sem registrar no AOF (usado no carregamento de Dump)
+    bool restore(std::string_view key, const Value &val, uint64_t expireAtMs = 0)
+    {
+        return setInternal(key, val, expireAtMs);
+    }
+
     // Define chave com expiração em segundos de forma atômica (SETEX)
     bool setEx(std::string_view key, const Value &val, int64_t seconds);
 

@@ -14,6 +14,7 @@ class AOF
 private:
     std::string filePath;
     std::ofstream fileStream;
+    bool enabled{true};
 
 public:
     explicit AOF(const std::string &path = "appendonly.aof");
@@ -32,6 +33,10 @@ public:
 
     // Limpa todo o conteúdo do arquivo AOF
     bool clear();
+
+    void setEnabled(bool state) { enabled = state; }
+    bool isEnabled() const { return enabled; }
+    const std::string &getFilePath() const { return filePath; }
 };
 
 #endif // MNEM_AOF_H

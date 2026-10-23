@@ -14,8 +14,11 @@ public:
     explicit CommandHandler(FlatTable &tbl);
 
     // Executa uma lista de tokens de comando e retorna a resposta formatada pelo protocolo.
-    // Sinaliza shouldClose = true caso o comando seja QUIT ou encerre a sessão.
+    // Sinaliza shouldClose = true caso o comando seja QUIT/EXIT ou encerre a sessão.
     std::string execute(const std::vector<std::string> &tokens, bool &shouldClose);
+
+    // Lê e reexecuta os comandos pendentes no arquivo AOF sem regravar no próprio AOF
+    size_t replayAof();
 
 private:
     FlatTable &table;
@@ -37,6 +40,7 @@ private:
     std::string handleRename(const std::vector<std::string> &tokens);
     std::string handleRenameNx(const std::vector<std::string> &tokens);
     std::string handlePurge(const std::vector<std::string> &tokens);
+    std::string handleDump(const std::vector<std::string> &tokens);
     std::string handleDbSize(const std::vector<std::string> &tokens);
     std::string handleInfo(const std::vector<std::string> &tokens);
     std::string handleHelp(const std::vector<std::string> &tokens);

@@ -1,5 +1,6 @@
 #include "headers/ft/TTLOperation.h"
 #include "headers/ft/FlatTable.h"
+#include <string>
 
 using namespace std;
 
@@ -47,10 +48,12 @@ bool TTLOperation::pexpire(string_view key, int64_t milliseconds)
     if (milliseconds <= 0)
     {
         table.deleteSlot(idx);
+        table.getAof().append("DEL " + string(key));
         return true;
     }
 
     slot.item->expireAtMs = now + static_cast<uint64_t>(milliseconds);
+    table.getAof().append("PEXPIRE " + string(key) + " " + to_string(milliseconds));
     return true;
 }
 
@@ -84,10 +87,12 @@ bool TTLOperation::pexpireAt(string_view key, uint64_t unixTimeMs)
     if (unixTimeMs <= now)
     {
         table.deleteSlot(idx);
+        table.getAof().append("DEL " + string(key));
         return true;
     }
 
     slot.item->expireAtMs = unixTimeMs;
+    table.getAof().append("PEXPIRE " + string(key) + " " + to_string(unixTimeMs - now));
     return true;
 }
 
@@ -156,6 +161,7 @@ bool TTLOperation::persist(string_view key)
     }
 
     slot.item->expireAtMs = 0;
+    table.getAof().append("PERSIST " + string(key));
     return true;
 }
 

@@ -2,6 +2,7 @@
 #include "headers/network/Protocol.h"
 #include <algorithm>
 #include <sstream>
+#include <fstream>
 #include <cctype>
 
 using namespace std;
@@ -98,6 +99,10 @@ string CommandHandler::execute(const vector<string> &tokens, bool &shouldClose)
     {
         return handlePurge(tokens);
     }
+    if (cmd == "DUMP")
+    {
+        return handleDump(tokens);
+    }
     if (cmd == "DBSIZE" || cmd == "COUNT")
     {
         return handleDbSize(tokens);
@@ -108,6 +113,7 @@ string CommandHandler::execute(const vector<string> &tokens, bool &shouldClose)
     }
     if (cmd == "QUIT" || cmd == "EXIT")
     {
+        table.dump();
         shouldClose = true;
         return Protocol::formatSimpleString("OK");
     }
@@ -117,6 +123,73 @@ string CommandHandler::execute(const vector<string> &tokens, bool &shouldClose)
     }
 
     return Protocol::formatError("unknown command '" + tokens[0] + "'");
+}
+
+size_t CommandHandler::replayAof()
+{
+    const string &aofPath = table.getAof().getFilePath();
+    ifstream in(aofPath, ios::in | ios::binary);
+    if (!in.is_open())
+    {
+        return 0;
+    }
+
+    string content((istreambuf_iterator<char>(in)), istreambuf_iterator<char>());
+    in.close();
+
+    if (content.empty())
+    {
+        return 0;
+    }
+
+    // Suspende a escrita no AOF durante a reexecução para não duplicar os comandos
+    table.getAof().setEnabled(false);
+
+    size_t replayedCount = 0;
+    string_view remaining(content);
+
+    while (!remaining.empty())
+    {
+        vector<string> tokens;
+        size_t consumed = 0;
+        Protocol::ParseStatus status = Protocol::parseCommand(remaining, tokens, consumed);
+
+        if (status == Protocol::ParseStatus::OK)
+        {
+            remaining.remove_prefix(consumed);
+            bool dummyClose = false;
+            execute(tokens, dummyClose);
+            ++replayedCount;
+        }
+        else if (status == Protocol::ParseStatus::ERROR)
+        {
+            if (consumed > 0)
+            {
+                remaining.remove_prefix(consumed);
+            }
+            else
+            {
+                break;
+            }
+        }
+        else
+        {
+            // Caso a última linha não tenha quebra de linha ao final
+            string tailLine(remaining);
+            tailLine.push_back('\n');
+            if (Protocol::parseCommand(tailLine, tokens, consumed) == Protocol::ParseStatus::OK)
+            {
+                bool dummyClose = false;
+                execute(tokens, dummyClose);
+                ++replayedCount;
+            }
+            break;
+        }
+    }
+
+    table.getAof().setEnabled(true);
+    table.clearAof();
+    return replayedCount;
 }
 
 string CommandHandler::handlePing(const vector<string> &tokens)
@@ -143,6 +216,7 @@ string CommandHandler::handleSet(const vector<string> &tokens)
     const string &key = tokens[1];
     const string &valStr = tokens[2];
 
+    int64_t expireSec = 0;
     int64_t expireMs = 0;
     for (size_t i = 3; i < tokens.size(); ++i)
     {
@@ -156,7 +230,8 @@ string CommandHandler::handleSet(const vector<string> &tokens)
                 {
                     return Protocol::formatError("invalid expire time in 'set' command");
                 }
-                expireMs = sec * 1000;
+                expireSec = sec;
+                expireMs = 0;
             }
             catch (...)
             {
@@ -173,6 +248,7 @@ string CommandHandler::handleSet(const vector<string> &tokens)
                     return Protocol::formatError("invalid expire time in 'set' command");
                 }
                 expireMs = ms;
+                expireSec = 0;
             }
             catch (...)
             {
@@ -259,7 +335,11 @@ string CommandHandler::handleSet(const vector<string> &tokens)
     }
 
     bool success = false;
-    if (expireMs > 0)
+    if (expireSec > 0)
+    {
+        success = table.setEx(key, valVariant, expireSec);
+    }
+    else if (expireMs > 0)
     {
         success = table.setPx(key, valVariant, expireMs);
     }
@@ -573,6 +653,20 @@ string CommandHandler::handlePurge(const vector<string> &tokens)
     return Protocol::formatInteger(static_cast<int64_t>(count));
 }
 
+string CommandHandler::handleDump(const vector<string> &tokens)
+{
+    if (tokens.size() != 1)
+    {
+        return Protocol::formatError("wrong number of arguments for 'dump' command");
+    }
+
+    if (table.dump())
+    {
+        return Protocol::formatSimpleString("OK");
+    }
+    return Protocol::formatError("failed to generate dump");
+}
+
 string CommandHandler::handleDbSize(const vector<string> &tokens)
 {
     (void)tokens;
@@ -620,9 +714,10 @@ string CommandHandler::handleHelp(const vector<string> &tokens)
         "  RENAME key newkey\n"
         "  RENAMENX key newkey\n"
         "  PURGE\n"
+        "  DUMP\n"
         "  DBSIZE\n"
         "  INFO\n"
-        "  QUIT";
+        "  QUIT / EXIT";
 
     return Protocol::formatBulkString(helpText);
 }
