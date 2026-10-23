@@ -1,23 +1,95 @@
 #include "headers/ft/WriteOperation.h"
 #include "headers/ft/FlatTable.h"
+#include "headers/AOF.h"
 #include <cstring>
 #include <type_traits>
+#include <string>
 
 using namespace std;
 
-// Construtor: vincula a operação à instância da FlatTable
-WriteOperation::WriteOperation(FlatTable &tbl)
-    : table(tbl)
+// Construtor: vincula a operação à instância da FlatTable e inicializa o AOF
+WriteOperation::WriteOperation(FlatTable &tbl, const string &aofPath)
+    : table(tbl),
+      aof(aofPath)
 {
 }
 
-// Insere ou atualiza uma chave na tabela (Comando SET):
-// 1. Extrai a representação em bytes do tipo Value (variant).
-// 2. Se a chave já existir (slot OCCUPIED com mesma chave), substitui o item na mesma posição.
-// 3. Se for uma nova inserção, reutiliza o primeiro TOMBSTONE encontrado durante a sondagem
-//    ou insere no primeiro slot EMPTY.
-// 4. Atribui expireAtMs ao novo item (se 0, limpa qualquer TTL anterior).
-bool WriteOperation::set(string_view key, const Value &val, uint64_t expireAtMs)
+string WriteOperation::formatTokenForAof(string_view token)
+{
+    if (token.empty())
+    {
+        return "\"\"";
+    }
+
+    bool needsQuotes = false;
+    for (char c : token)
+    {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '"' || c == '\'')
+        {
+            needsQuotes = true;
+            break;
+        }
+    }
+
+    if (!needsQuotes)
+    {
+        return string(token);
+    }
+
+    string escaped = "\"";
+    escaped.reserve(token.size() + 4);
+    for (char c : token)
+    {
+        if (c == '"' || c == '\\')
+        {
+            escaped += '\\';
+        }
+        escaped += c;
+    }
+    escaped += '"';
+    return escaped;
+}
+
+string WriteOperation::formatValueForAof(const Value &val)
+{
+    string result;
+    visit([&](const auto &v)
+          {
+        using T = decay_t<decltype(v)>;
+        if constexpr (is_same_v<T, int64_t>)
+        {
+            result = to_string(v);
+        }
+        else if constexpr (is_same_v<T, double>)
+        {
+            string s = to_string(v);
+            if (s.find('.') != string::npos)
+            {
+                while (s.size() > 1 && s.back() == '0' && *(s.rbegin() + 1) != '.')
+                {
+                    s.pop_back();
+                }
+            }
+            result = s;
+        }
+        else if constexpr (is_same_v<T, string_view>)
+        {
+            result = formatTokenForAof(v);
+        }
+        else if constexpr (is_same_v<T, Binary>)
+        {
+            string_view binView(reinterpret_cast<const char *>(v.data()), v.size());
+            result = formatTokenForAof(binView);
+        }
+        else if constexpr (is_same_v<T, Json>)
+        {
+            result = formatTokenForAof(v.data);
+        } }, val);
+    return result;
+}
+
+// Implementação interna de SET sem disparar escrita duplicada no AOF
+bool WriteOperation::setInternal(string_view key, const Value &val, uint64_t expireAtMs)
 {
     ValueType type = ValueType::STRING;
     string_view valBytes;
@@ -126,30 +198,59 @@ bool WriteOperation::set(string_view key, const Value &val, uint64_t expireAtMs)
     return false; // Tabela 100% cheia sem tombstones livres
 }
 
-// Atalho atômico SETEX: calcula o timestamp absoluto a partir de 'seconds' e invoca set()
+// Insere ou atualiza uma chave na tabela (Comando SET) e registra no AOF
+bool WriteOperation::set(string_view key, const Value &val, uint64_t expireAtMs)
+{
+    if (!setInternal(key, val, expireAtMs))
+    {
+        return false;
+    }
+
+    string op = "SET " + formatTokenForAof(key) + " " + formatValueForAof(val);
+    if (expireAtMs > 0)
+    {
+        uint64_t now = FlatTable::getCurrentTimeMs();
+        int64_t remainingMs = (expireAtMs > now) ? static_cast<int64_t>(expireAtMs - now) : 1;
+        op += " PX " + to_string(remainingMs);
+    }
+    aof.append(op);
+    return true;
+}
+
+// Atalho atômico SETEX: calcula o timestamp absoluto a partir de 'seconds', grava e registra no AOF
 bool WriteOperation::setEx(string_view key, const Value &val, int64_t seconds)
 {
     if (seconds <= 0)
         return false;
 
     uint64_t now = FlatTable::getCurrentTimeMs();
-    return set(key, val, now + static_cast<uint64_t>(seconds) * 1000);
+    if (!setInternal(key, val, now + static_cast<uint64_t>(seconds) * 1000))
+    {
+        return false;
+    }
+
+    aof.append("SET " + formatTokenForAof(key) + " " + formatValueForAof(val) + " EX " + to_string(seconds));
+    return true;
 }
 
-// Atalho atômico PSETEX: calcula o timestamp absoluto a partir de 'milliseconds' e invoca set()
+// Atalho atômico PSETEX: calcula o timestamp absoluto a partir de 'milliseconds', grava e registra no AOF
 bool WriteOperation::setPx(string_view key, const Value &val, int64_t milliseconds)
 {
     if (milliseconds <= 0)
         return false;
 
     uint64_t now = FlatTable::getCurrentTimeMs();
-    return set(key, val, now + static_cast<uint64_t>(milliseconds));
+    if (!setInternal(key, val, now + static_cast<uint64_t>(milliseconds)))
+    {
+        return false;
+    }
+
+    aof.append("SET " + formatTokenForAof(key) + " " + formatValueForAof(val) + " PX " + to_string(milliseconds));
+    return true;
 }
 
-// Exclui uma chave explicitamente (Comando DEL):
-// Se a chave já estiver expirada, limpa o slot e retorna false (DEL de chave expirada retorna 0).
-// Se estiver ativa, remove o slot e retorna true.
-bool WriteOperation::del(string_view key)
+// Implementação interna de DEL sem disparar escrita no AOF
+bool WriteOperation::delInternal(string_view key)
 {
     size_t idx = table.findSlotIndex(key);
     if (idx == table.capacity)
@@ -169,15 +270,56 @@ bool WriteOperation::del(string_view key)
     return true;
 }
 
-// Renomeia 'key' para 'newKey' (Comando RENAME / RENAMENX):
-// Preserva tanto o valor quanto o TTL restante da chave original no novo nome.
+// Exclui uma chave explicitamente (Comando DEL) e registra no AOF
+bool WriteOperation::del(string_view key)
+{
+    if (!delInternal(key))
+    {
+        return false;
+    }
+
+    aof.append("DEL " + formatTokenForAof(key));
+    return true;
+}
+
+// Implementação interna de substituição atômica de chave
+bool WriteOperation::replaceKeyAtomicallyInternal(
+    string_view key,
+    string_view newKey,
+    const Value &value,
+    bool onlyIfDestinationMissing,
+    uint64_t expireAtMs)
+{
+    if (key == newKey)
+        return table.exists(key);
+
+    if (onlyIfDestinationMissing && table.exists(newKey))
+        return false;
+
+    if (!setInternal(newKey, value, expireAtMs))
+        return false;
+
+    if (!delInternal(key))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+// Renomeia 'key' para 'newKey' (Comando RENAME / RENAMENX) e registra no AOF
 bool WriteOperation::rename(
     string_view key,
     string_view newKey,
     bool renameIfNotExist)
 {
     if (key == newKey)
-        return table.exists(key);
+    {
+        if (!table.exists(key))
+            return false;
+        aof.append(string(renameIfNotExist ? "RENAMENX " : "RENAME ") + formatTokenForAof(key) + " " + formatTokenForAof(newKey));
+        return true;
+    }
 
     size_t idx = table.findSlotIndex(key);
     if (idx == table.capacity)
@@ -197,17 +339,21 @@ bool WriteOperation::rename(
     if (!value)
         return false;
 
-    return replaceKeyAtomically(
-        key,
-        newKey,
-        *value,
-        renameIfNotExist,
-        keyExpireAtMs);
+    if (!replaceKeyAtomicallyInternal(
+            key,
+            newKey,
+            *value,
+            renameIfNotExist,
+            keyExpireAtMs))
+    {
+        return false;
+    }
+
+    aof.append(string(renameIfNotExist ? "RENAMENX " : "RENAME ") + formatTokenForAof(key) + " " + formatTokenForAof(newKey));
+    return true;
 }
 
-// Substituição atômica de chave:
-// Insere a nova chave com o valor e o timestamp de expiração fornecido;
-// se obtiver sucesso, remove a chave antiga.
+// Substituição atômica de chave pública com registro no AOF
 bool WriteOperation::replaceKeyAtomically(
     string_view key,
     string_view newKey,
@@ -215,20 +361,12 @@ bool WriteOperation::replaceKeyAtomically(
     bool onlyIfDestinationMissing,
     uint64_t expireAtMs)
 {
-    if (key == newKey)
-        return table.exists(key);
-
-    if (onlyIfDestinationMissing && table.exists(newKey))
-        return false;
-
-    if (!set(newKey, value, expireAtMs))
-        return false;
-
-    if (!del(key))
+    if (!replaceKeyAtomicallyInternal(key, newKey, value, onlyIfDestinationMissing, expireAtMs))
     {
         return false;
     }
 
+    aof.append(string(onlyIfDestinationMissing ? "RENAMENX " : "RENAME ") + formatTokenForAof(key) + " " + formatTokenForAof(newKey));
     return true;
 }
 
@@ -265,7 +403,20 @@ bool WriteOperation::increment(string_view key, uint64_t quantity)
         value = currentValue + static_cast<double>(quantity);
     }
 
-    return set(key, value, keyExpireAtMs);
+    if (!setInternal(key, value, keyExpireAtMs))
+    {
+        return false;
+    }
+
+    if (quantity == 1)
+    {
+        aof.append("INCR " + formatTokenForAof(key));
+    }
+    else
+    {
+        aof.append("INCRBY " + formatTokenForAof(key) + " " + to_string(quantity));
+    }
+    return true;
 }
 
 bool WriteOperation::decrement(string_view key, uint64_t quantity)
@@ -301,5 +452,18 @@ bool WriteOperation::decrement(string_view key, uint64_t quantity)
         value = currentValue - static_cast<double>(quantity);
     }
 
-    return set(key, value, keyExpireAtMs);
+    if (!setInternal(key, value, keyExpireAtMs))
+    {
+        return false;
+    }
+
+    if (quantity == 1)
+    {
+        aof.append("DECR " + formatTokenForAof(key));
+    }
+    else
+    {
+        aof.append("DECRBY " + formatTokenForAof(key) + " " + to_string(quantity));
+    }
+    return true;
 }

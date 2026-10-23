@@ -1,8 +1,10 @@
 #pragma once
 
 #include <string_view>
+#include <string>
 #include <cstdint>
 #include "headers/ft/FlatTableTypes.h"
+#include "headers/AOF.h"
 
 #ifndef MNEM_WRITEOPERATION_H
 #define MNEM_WRITEOPERATION_H
@@ -14,9 +16,22 @@ class WriteOperation
 {
 private:
     FlatTable &table;
+    AOF aof;
+
+    bool setInternal(std::string_view key, const Value &val, uint64_t expireAtMs = 0);
+    bool delInternal(std::string_view key);
+    bool replaceKeyAtomicallyInternal(
+        std::string_view key,
+        std::string_view newKey,
+        const Value &value,
+        bool onlyIfDestinationMissing,
+        uint64_t expireAtMs = 0);
+
+    static std::string formatTokenForAof(std::string_view token);
+    static std::string formatValueForAof(const Value &val);
 
 public:
-    explicit WriteOperation(FlatTable &tbl);
+    explicit WriteOperation(FlatTable &tbl, const std::string &aofPath = "appendonly.aof");
 
     // Insere ou atualiza uma chave com um valor e opcionalmente um timestamp de expiração (em ms).
     // Nota: ao atualizar uma chave existente sem informar expireAtMs, qualquer TTL prévio é resetado.
@@ -44,6 +59,11 @@ public:
 
     bool increment(std::string_view key, uint64_t quantity = 1);
     bool decrement(std::string_view key, uint64_t quantity = 1);
+
+    // Acesso ao mecanismo de persistência AOF
+    AOF &getAof() { return aof; }
+    const AOF &getAof() const { return aof; }
+    bool clearAof() { return aof.clear(); }
 };
 
 #endif // MNEM_WRITEOPERATION_H

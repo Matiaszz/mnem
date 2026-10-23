@@ -27,4 +27,10 @@ add_executable(mnem
         src/memory/ft/TTLOperation.cpp
         src/network/Protocol.cpp
         src/network/CommandHandler.cpp
-        src/network/Server.cpp)
+        src/network/ConnectionManager.cpp
+        src/network/Server.cpp
+        src/persistence/AOF.cpp)
+
+if(WIN32)
+    target_link_libraries(mnem PRIVATE ws2_32)
+endif()

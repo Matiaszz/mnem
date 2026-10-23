@@ -145,6 +145,8 @@ public:
     ReadOperation &read() { return readOp; }
     WriteOperation &write() { return writeOp; }
     TTLOperation &ttlOps() { return ttlOp; }
+    AOF &getAof() { return writeOp.getAof(); }
+    bool clearAof() { return writeOp.clearAof(); }
     SlabAllocator &getAllocator() { return allocator; }
     const SlabAllocator &getAllocator() const { return allocator; }
 

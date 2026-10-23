@@ -1,15 +1,16 @@
 #pragma once
 
 #include <string>
-#include <unordered_map>
 #include <atomic>
 #include "headers/ft/FlatTable.h"
 #include "headers/network/CommandHandler.h"
+#include "headers/network/ConnectionManager.h"
+#include "platform/net_socket.h"
 
 #ifndef MNEM_SERVER_H
 #define MNEM_SERVER_H
 
-// Servidor TCP baseado em epoll para recepção e processamento de conexões de clientes.
+// Servidor TCP principal: orquestra o socket de escuta, o laço de eventos e a limpeza periódica de TTL.
 class Server
 {
 public:
@@ -31,32 +32,18 @@ public:
     const std::string &getHost() const { return host; }
 
 private:
-    struct Connection
-    {
-        int fd{-1};
-        std::string inBuffer;
-        std::string outBuffer;
-        bool shouldClose{false};
-    };
-
     FlatTable &table;
     CommandHandler commandHandler;
+    mnem::platform::SocketPoller poller;
+    ConnectionManager connectionManager;
+
     int port;
     std::string host;
-
     int serverFd{-1};
-    int epollFd{-1};
     std::atomic<bool> running{false};
 
-    std::unordered_map<int, Connection> connections;
-
-    bool initSocket();
-    void acceptConnection();
-    void handleClientRead(int clientFd);
-    void handleClientWrite(int clientFd);
-    void closeConnection(int clientFd);
-    void setNonBlocking(int fd);
-    void flushOutput(Connection &conn);
+    void setupSignals();
+    void runEventLoop();
 };
 
 #endif // MNEM_SERVER_H
