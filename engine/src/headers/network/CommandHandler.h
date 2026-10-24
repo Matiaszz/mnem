@@ -25,6 +25,8 @@ private:
 
     std::string handlePing(const std::vector<std::string> &tokens);
     std::string handleSet(const std::vector<std::string> &tokens);
+    std::string handleSetEx(const std::vector<std::string> &tokens);
+    std::string handlePSetEx(const std::vector<std::string> &tokens);
     std::string handleGet(const std::vector<std::string> &tokens);
     std::string handleDel(const std::vector<std::string> &tokens);
     std::string handleExists(const std::vector<std::string> &tokens);
@@ -34,6 +36,8 @@ private:
     std::string handleDecrBy(const std::vector<std::string> &tokens);
     std::string handleExpire(const std::vector<std::string> &tokens);
     std::string handlePExpire(const std::vector<std::string> &tokens);
+    std::string handleExpireAt(const std::vector<std::string> &tokens);
+    std::string handlePExpireAt(const std::vector<std::string> &tokens);
     std::string handleTtl(const std::vector<std::string> &tokens);
     std::string handlePTtl(const std::vector<std::string> &tokens);
     std::string handlePersist(const std::vector<std::string> &tokens);

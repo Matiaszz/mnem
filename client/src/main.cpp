@@ -2,12 +2,25 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <cstring>
+#include <cerrno>
+#include <cstdint>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <cstring>
-#include <cerrno>
+#endif
 
 using namespace std;
 
@@ -17,21 +30,38 @@ public:
     StorageClient(const string &host = "127.0.0.1", int port = 6379)
         : host(host), port(port), sockFd(-1)
     {
+#ifdef _WIN32
+        WSADATA wsaData{};
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
     }
 
     ~StorageClient()
     {
         disconnect();
+#ifdef _WIN32
+        WSACleanup();
+#endif
     }
 
     bool connectToServer()
     {
+#ifdef _WIN32
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET)
+        {
+            cerr << "[Client] Erro ao criar socket: " << WSAGetLastError() << "\n";
+            return false;
+        }
+        sockFd = static_cast<int>(s);
+#else
         sockFd = socket(AF_INET, SOCK_STREAM, 0);
         if (sockFd < 0)
         {
             cerr << "[Client] Erro ao criar socket: " << strerror(errno) << "\n";
             return false;
         }
+#endif
 
         sockaddr_in serverAddr{};
         serverAddr.sin_family = AF_INET;
@@ -40,30 +70,34 @@ public:
         if (inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr) <= 0)
         {
             cerr << "[Client] Endereço de host inválido: " << host << "\n";
-            close(sockFd);
-            sockFd = -1;
+            closeSocket();
             return false;
         }
 
+#ifdef _WIN32
+        if (connect(static_cast<SOCKET>(sockFd), reinterpret_cast<sockaddr *>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
+        {
+            cerr << "[Client] Não foi possível conectar a " << host << ":" << port
+                 << " (erro " << WSAGetLastError() << "). O servidor está em execução?\n";
+            closeSocket();
+            return false;
+        }
+#else
         if (connect(sockFd, reinterpret_cast<sockaddr *>(&serverAddr), sizeof(serverAddr)) < 0)
         {
             cerr << "[Client] Não foi possível conectar a " << host << ":" << port
                  << " (" << strerror(errno) << "). O servidor está em execução?\n";
-            close(sockFd);
-            sockFd = -1;
+            closeSocket();
             return false;
         }
+#endif
 
         return true;
     }
 
     void disconnect()
     {
-        if (sockFd != -1)
-        {
-            close(sockFd);
-            sockFd = -1;
-        }
+        closeSocket();
     }
 
     bool isConnected() const
@@ -85,6 +119,15 @@ public:
             toSend += "\r\n";
         }
 
+#ifdef _WIN32
+        int sent = send(static_cast<SOCKET>(sockFd), toSend.data(), static_cast<int>(toSend.size()), 0);
+        if (sent == SOCKET_ERROR)
+        {
+            cerr << "[Client] Falha ao enviar comando: " << WSAGetLastError() << "\n";
+            disconnect();
+            return false;
+        }
+#else
         ssize_t sent = send(sockFd, toSend.data(), toSend.size(), 0);
         if (sent < 0)
         {
@@ -92,6 +135,7 @@ public:
             disconnect();
             return false;
         }
+#endif
 
         return readResponse(responseFormatted);
     }
@@ -103,6 +147,19 @@ private:
     string host;
     int port;
     int sockFd;
+
+    void closeSocket()
+    {
+        if (sockFd != -1)
+        {
+#ifdef _WIN32
+            closesocket(static_cast<SOCKET>(sockFd));
+#else
+            close(sockFd);
+#endif
+            sockFd = -1;
+        }
+    }
 
     static bool isNumeric(const string &s)
     {
@@ -195,6 +252,15 @@ private:
 
     static string formatTypedValue(const string &data)
     {
+        if (data.find('\n') != string::npos)
+        {
+            string cleaned = data;
+            while (!cleaned.empty() && (cleaned.back() == '\r' || cleaned.back() == '\n'))
+            {
+                cleaned.pop_back();
+            }
+            return cleaned;
+        }
         if (isNumeric(data))
         {
             return data;
@@ -216,7 +282,11 @@ private:
 
     bool readByte(char &c)
     {
+#ifdef _WIN32
+        int n = recv(static_cast<SOCKET>(sockFd), &c, 1, 0);
+#else
         ssize_t n = recv(sockFd, &c, 1, 0);
+#endif
         if (n <= 0)
         {
             return false;
@@ -259,12 +329,16 @@ private:
         size_t total = 0;
         while (total < count)
         {
+#ifdef _WIN32
+            int n = recv(static_cast<SOCKET>(sockFd), &out[total], static_cast<int>(count - total), 0);
+#else
             ssize_t n = recv(sockFd, &out[total], count - total, 0);
+#endif
             if (n <= 0)
             {
                 return false;
             }
-            total += n;
+            total += static_cast<size_t>(n);
         }
         return true;
     }
@@ -401,9 +475,13 @@ static void printHelp()
          << "  Exemplos:\n"
          << "    ./mnem-cli PING\n"
          << "    ./mnem-cli SET usuario Allan\n"
+         << "    ./mnem-cli SET sessao token123 EX 60\n"
+         << "    ./mnem-cli SET cache dados PX 5000 NX\n"
          << "    ./mnem-cli GET usuario\n"
-         << "    ./mnem-cli INCR visitas\n"
-         << "    ./mnem-cli TTL visitas\n";
+         << "    ./mnem-cli EXPIRE usuario 120\n"
+         << "    ./mnem-cli INCR visitas 5\n"
+         << "    ./mnem-cli TTL sessao\n"
+         << "    ./mnem-cli HELP\n";
 }
 
 int main(int argc, char *argv[])
@@ -416,9 +494,9 @@ int main(int argc, char *argv[])
     while (idx < argc)
     {
         string arg = argv[idx];
-        if (arg == "--help" || arg == "-h")
+        if (cmdArgs.empty() && (arg == "--help" || arg == "-h"))
         {
-            if (idx + 1 < argc && argv[idx + 1][0] != '-')
+            if (arg == "-h" && idx + 1 < argc && argv[idx + 1][0] != '-')
             {
                 host = argv[++idx];
             }
@@ -428,7 +506,7 @@ int main(int argc, char *argv[])
                 return 0;
             }
         }
-        else if (arg == "-p" && idx + 1 < argc)
+        else if (cmdArgs.empty() && arg == "-p" && idx + 1 < argc)
         {
             try
             {
@@ -488,7 +566,7 @@ int main(int argc, char *argv[])
     cout << "=========================================================\n";
     cout << "  MNEM CLI Client\n";
     cout << "  Conectado em " << client.getHost() << ":" << client.getPort() << "\n";
-    cout << "  Digite comandos (ex: SET chave valor, GET chave, PING, HELP)\n";
+    cout << "  Digite comandos (ex: SET chave valor [EX seg], GET chave, PING, HELP)\n";
     cout << "  Digite 'quit' ou 'exit' para sair.\n";
     cout << "=========================================================\n";
 
@@ -512,7 +590,7 @@ int main(int argc, char *argv[])
         size_t last = line.find_last_not_of(" \t\r\n");
         string trimmed = line.substr(first, last - first + 1);
 
-        if (trimmed == "exit" || trimmed == "quit" || trimmed == "QUIT")
+        if (trimmed == "exit" || trimmed == "quit" || trimmed == "QUIT" || trimmed == "EXIT")
         {
             string resp;
             client.sendCommand("QUIT", resp);

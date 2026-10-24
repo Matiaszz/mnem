@@ -74,11 +74,69 @@ Protocol::ParseStatus Protocol::parseInlineCommand(string_view input, vector<str
     string current;
     bool inDoubleQuotes = false;
     bool inSingleQuotes = false;
+    bool hadQuotes = false;
     bool escaping = false;
+
+    int jsonBraceDepth = 0;
+    int jsonBracketDepth = 0;
+    bool inJsonString = false;
+
+    auto isBracketedOptionStart = [&](size_t pos) -> bool {
+        if (pos + 1 >= line.size() || line[pos] != '[')
+            return false;
+        size_t p = pos + 1;
+        while (p < line.size() && (line[p] == ' ' || line[p] == '\t'))
+            ++p;
+        size_t wordStart = p;
+        while (p < line.size() && isalpha(static_cast<unsigned char>(line[p])))
+            ++p;
+        if (p == wordStart)
+            return false;
+        string word;
+        for (size_t k = wordStart; k < p; ++k)
+            word += static_cast<char>(toupper(static_cast<unsigned char>(line[k])));
+        return (word == "EX" || word == "PX" || word == "EXPIRE" || word == "PEXPIRE" ||
+                word == "EXAT" || word == "PXAT" || word == "EXPIREAT" || word == "PEXPIREAT" ||
+                word == "NX" || word == "XX" || word == "GT" || word == "LT" ||
+                word == "KEEPTTL" || word == "GET" || word == "TTL" || word == "PTTL");
+    };
 
     for (size_t i = 0; i < line.size(); ++i)
     {
         char c = line[i];
+
+        // Se estamos dentro de um objeto/array JSON não-aspado externamente, preserva aspas e espaços internos
+        if (jsonBraceDepth > 0 || jsonBracketDepth > 0)
+        {
+            current += c;
+            if (escaping)
+            {
+                escaping = false;
+                continue;
+            }
+            if (c == '\\' && inJsonString)
+            {
+                escaping = true;
+                continue;
+            }
+            if (c == '"')
+            {
+                inJsonString = !inJsonString;
+                continue;
+            }
+            if (!inJsonString)
+            {
+                if (c == '{')
+                    ++jsonBraceDepth;
+                else if (c == '}')
+                    --jsonBraceDepth;
+                else if (c == '[')
+                    ++jsonBracketDepth;
+                else if (c == ']')
+                    --jsonBracketDepth;
+            }
+            continue;
+        }
 
         if (escaping)
         {
@@ -96,21 +154,40 @@ Protocol::ParseStatus Protocol::parseInlineCommand(string_view input, vector<str
         if (c == '"' && !inSingleQuotes)
         {
             inDoubleQuotes = !inDoubleQuotes;
+            hadQuotes = true;
             continue;
         }
 
         if (c == '\'' && !inDoubleQuotes)
         {
             inSingleQuotes = !inSingleQuotes;
+            hadQuotes = true;
             continue;
+        }
+
+        if (!inDoubleQuotes && !inSingleQuotes && current.empty() && !hadQuotes)
+        {
+            if (c == '{')
+            {
+                jsonBraceDepth = 1;
+                current += c;
+                continue;
+            }
+            if (c == '[' && !isBracketedOptionStart(i))
+            {
+                jsonBracketDepth = 1;
+                current += c;
+                continue;
+            }
         }
 
         if (isspace(static_cast<unsigned char>(c)) && !inDoubleQuotes && !inSingleQuotes)
         {
-            if (!current.empty())
+            if (!current.empty() || hadQuotes)
             {
                 tokens.push_back(std::move(current));
                 current.clear();
+                hadQuotes = false;
             }
         }
         else
@@ -119,12 +196,12 @@ Protocol::ParseStatus Protocol::parseInlineCommand(string_view input, vector<str
         }
     }
 
-    if (inDoubleQuotes || inSingleQuotes)
+    if (inDoubleQuotes || inSingleQuotes || jsonBraceDepth != 0 || jsonBracketDepth != 0)
     {
         return ParseStatus::ERROR;
     }
 
-    if (!current.empty())
+    if (!current.empty() || hadQuotes)
     {
         tokens.push_back(std::move(current));
     }

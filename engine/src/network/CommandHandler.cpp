@@ -7,6 +7,73 @@
 
 using namespace std;
 
+namespace
+{
+    string stripOptionBrackets(string s)
+    {
+        while (!s.empty() && s.front() == '[')
+        {
+            s.erase(s.begin());
+        }
+        while (!s.empty() && s.back() == ']')
+        {
+            s.pop_back();
+        }
+        return s;
+    }
+
+    bool parseStrictInt64(const string &str, int64_t &outVal)
+    {
+        string cleaned = stripOptionBrackets(str);
+        if (cleaned.empty())
+        {
+            return false;
+        }
+        try
+        {
+            size_t idx = 0;
+            outVal = stoll(cleaned, &idx);
+            return idx == cleaned.size();
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool checkExpireCondition(int64_t currentPttl, int64_t newRemainingMs, const string &cond)
+    {
+        if (cond.empty())
+        {
+            return true;
+        }
+        if (cond == "NX")
+        {
+            return currentPttl == -1;
+        }
+        if (cond == "XX")
+        {
+            return currentPttl >= 0;
+        }
+        if (cond == "GT")
+        {
+            // Em Redis, uma chave sem expiração (persistente) tem TTL infinito, portanto GT falha se currentPttl == -1
+            return currentPttl >= 0 && newRemainingMs > currentPttl;
+        }
+        if (cond == "LT")
+        {
+            // Se não possui expiração (-1), o novo TTL finito é menor que infinito
+            return currentPttl == -1 || (currentPttl >= 0 && newRemainingMs < currentPttl);
+        }
+        return false;
+    }
+
+    bool isValidExpireCondition(const string &cond)
+    {
+        return cond == "NX" || cond == "XX" || cond == "GT" || cond == "LT";
+    }
+}
+
 CommandHandler::CommandHandler(FlatTable &tbl)
     : table(tbl)
 {
@@ -38,6 +105,14 @@ string CommandHandler::execute(const vector<string> &tokens, bool &shouldClose)
     if (cmd == "SET")
     {
         return handleSet(tokens);
+    }
+    if (cmd == "SETEX")
+    {
+        return handleSetEx(tokens);
+    }
+    if (cmd == "PSETEX" || cmd == "SETPX")
+    {
+        return handlePSetEx(tokens);
     }
     if (cmd == "GET")
     {
@@ -74,6 +149,14 @@ string CommandHandler::execute(const vector<string> &tokens, bool &shouldClose)
     if (cmd == "PEXPIRE")
     {
         return handlePExpire(tokens);
+    }
+    if (cmd == "EXPIREAT")
+    {
+        return handleExpireAt(tokens);
+    }
+    if (cmd == "PEXPIREAT")
+    {
+        return handlePExpireAt(tokens);
     }
     if (cmd == "TTL")
     {
@@ -202,62 +285,247 @@ string CommandHandler::handlePing(const vector<string> &tokens)
     {
         return Protocol::formatBulkString(tokens[1]);
     }
-    return Protocol::formatError("wrong number of arguments for 'ping' command");
+    string joined = tokens[1];
+    for (size_t i = 2; i < tokens.size(); ++i)
+    {
+        joined += " " + tokens[i];
+    }
+    return Protocol::formatBulkString(joined);
 }
 
 string CommandHandler::handleSet(const vector<string> &tokens)
 {
-    // Sintaxe: SET key value [EX seconds] [PX milliseconds]
+    // Sintaxe: SET key value [EX seconds | PX milliseconds | EXAT timestamp | PXAT ms-timestamp | KEEPTTL] [NX | XX] [GET]
     if (tokens.size() < 3)
     {
         return Protocol::formatError("wrong number of arguments for 'set' command");
     }
 
     const string &key = tokens[1];
-    const string &valStr = tokens[2];
+
+    auto isSetOptionKeyword = [&](const string &rawTok) -> bool {
+        string t = toUpper(stripOptionBrackets(rawTok));
+        size_t eqPos = t.find('=');
+        if (eqPos != string::npos)
+        {
+            t = t.substr(0, eqPos);
+        }
+        return (t == "EX" || t == "PX" || t == "EXPIRE" || t == "PEXPIRE" ||
+                t == "TTL" || t == "PTTL" || t == "EXAT" || t == "PXAT" ||
+                t == "EXPIREAT" || t == "PEXPIREAT" || t == "NX" || t == "XX" ||
+                t == "KEEPTTL" || t == "GET");
+    };
+
+    // Identifica onde começam os parâmetros opcionais (suporta valores com espaços caso seguidos por opções válidas)
+    size_t optStart = 3;
+    if (tokens.size() > 3 && !isSetOptionKeyword(tokens[3]))
+    {
+        size_t foundOpt = tokens.size();
+        for (size_t i = 4; i < tokens.size(); ++i)
+        {
+            if (isSetOptionKeyword(tokens[i]))
+            {
+                foundOpt = i;
+                break;
+            }
+        }
+        if (foundOpt < tokens.size())
+        {
+            optStart = foundOpt;
+        }
+    }
+
+    string valStr = tokens[2];
+    for (size_t i = 3; i < optStart; ++i)
+    {
+        valStr += " " + tokens[i];
+    }
 
     int64_t expireSec = 0;
     int64_t expireMs = 0;
-    for (size_t i = 3; i < tokens.size(); ++i)
+    uint64_t expireAtAbsMs = 0;
+    bool onlyIfNotExists = false;
+    bool onlyIfExists = false;
+    bool keepTtl = false;
+    bool returnOld = false;
+
+    // Atalho posicional: SET key value <seconds> (ex: SET chave valor 10)
+    if (optStart == 3 && tokens.size() == 4 && !isSetOptionKeyword(tokens[3]))
     {
-        string opt = toUpper(tokens[i]);
-        if (opt == "EX" && i + 1 < tokens.size())
+        int64_t posSec = 0;
+        if (parseStrictInt64(tokens[3], posSec))
         {
-            try
+            if (posSec <= 0)
             {
-                int64_t sec = stoll(tokens[++i]);
-                if (sec <= 0)
-                {
-                    return Protocol::formatError("invalid expire time in 'set' command");
-                }
-                expireSec = sec;
-                expireMs = 0;
+                return Protocol::formatError("invalid expire time in 'set' command");
             }
-            catch (...)
-            {
-                return Protocol::formatError("value is not an integer or out of range");
-            }
+            expireSec = posSec;
+            optStart = 4;
         }
-        else if (opt == "PX" && i + 1 < tokens.size())
+    }
+
+    for (size_t i = optStart; i < tokens.size(); ++i)
+    {
+        string rawOpt = stripOptionBrackets(tokens[i]);
+        string opt = toUpper(rawOpt);
+        string inlineArg;
+        size_t eqPos = opt.find('=');
+        if (eqPos != string::npos)
         {
-            try
+            inlineArg = rawOpt.substr(eqPos + 1);
+            opt = opt.substr(0, eqPos);
+        }
+
+        auto nextArg = [&](string &outArg) -> bool {
+            if (!inlineArg.empty())
             {
-                int64_t ms = stoll(tokens[++i]);
-                if (ms <= 0)
-                {
-                    return Protocol::formatError("invalid expire time in 'set' command");
-                }
-                expireMs = ms;
-                expireSec = 0;
+                outArg = inlineArg;
+                return true;
             }
-            catch (...)
+            if (i + 1 < tokens.size())
+            {
+                outArg = stripOptionBrackets(tokens[++i]);
+                return true;
+            }
+            return false;
+        };
+
+        if (opt == "EX" || opt == "EXPIRE" || opt == "TTL")
+        {
+            string argStr;
+            if (!nextArg(argStr))
+            {
+                return Protocol::formatError("syntax error in 'set' command");
+            }
+            int64_t sec = 0;
+            if (!parseStrictInt64(argStr, sec))
             {
                 return Protocol::formatError("value is not an integer or out of range");
             }
+            if (sec <= 0)
+            {
+                return Protocol::formatError("invalid expire time in 'set' command");
+            }
+            expireSec = sec;
+            expireMs = 0;
+            expireAtAbsMs = 0;
+            keepTtl = false;
+        }
+        else if (opt == "PX" || opt == "PEXPIRE" || opt == "PTTL")
+        {
+            string argStr;
+            if (!nextArg(argStr))
+            {
+                return Protocol::formatError("syntax error in 'set' command");
+            }
+            int64_t ms = 0;
+            if (!parseStrictInt64(argStr, ms))
+            {
+                return Protocol::formatError("value is not an integer or out of range");
+            }
+            if (ms <= 0)
+            {
+                return Protocol::formatError("invalid expire time in 'set' command");
+            }
+            expireMs = ms;
+            expireSec = 0;
+            expireAtAbsMs = 0;
+            keepTtl = false;
+        }
+        else if (opt == "EXAT" || opt == "EXPIREAT")
+        {
+            string argStr;
+            if (!nextArg(argStr))
+            {
+                return Protocol::formatError("syntax error in 'set' command");
+            }
+            int64_t unixSec = 0;
+            if (!parseStrictInt64(argStr, unixSec))
+            {
+                return Protocol::formatError("value is not an integer or out of range");
+            }
+            if (unixSec <= 0)
+            {
+                return Protocol::formatError("invalid expire time in 'set' command");
+            }
+            expireAtAbsMs = static_cast<uint64_t>(unixSec) * 1000;
+            expireSec = 0;
+            expireMs = 0;
+            keepTtl = false;
+        }
+        else if (opt == "PXAT" || opt == "PEXPIREAT")
+        {
+            string argStr;
+            if (!nextArg(argStr))
+            {
+                return Protocol::formatError("syntax error in 'set' command");
+            }
+            int64_t unixMs = 0;
+            if (!parseStrictInt64(argStr, unixMs))
+            {
+                return Protocol::formatError("value is not an integer or out of range");
+            }
+            if (unixMs <= 0)
+            {
+                return Protocol::formatError("invalid expire time in 'set' command");
+            }
+            expireAtAbsMs = static_cast<uint64_t>(unixMs);
+            expireSec = 0;
+            expireMs = 0;
+            keepTtl = false;
+        }
+        else if (opt == "NX")
+        {
+            onlyIfNotExists = true;
+        }
+        else if (opt == "XX")
+        {
+            onlyIfExists = true;
+        }
+        else if (opt == "KEEPTTL")
+        {
+            keepTtl = true;
+            expireSec = 0;
+            expireMs = 0;
+            expireAtAbsMs = 0;
+        }
+        else if (opt == "GET")
+        {
+            returnOld = true;
         }
         else
         {
             return Protocol::formatError("syntax error in 'set' command");
+        }
+    }
+
+    if (onlyIfNotExists && onlyIfExists)
+    {
+        return Protocol::formatError("NX and XX options at the same time are not compatible");
+    }
+
+    string oldFormatted = Protocol::formatNull();
+    if (returnOld)
+    {
+        oldFormatted = handleGet({"GET", key});
+    }
+
+    bool keyExists = table.exists(key);
+    if (onlyIfNotExists && keyExists)
+    {
+        return returnOld ? oldFormatted : Protocol::formatNull();
+    }
+    if (onlyIfExists && !keyExists)
+    {
+        return returnOld ? oldFormatted : Protocol::formatNull();
+    }
+
+    if (keepTtl && keyExists)
+    {
+        int64_t remMs = table.pttl(key);
+        if (remMs > 0)
+        {
+            expireMs = remMs;
         }
     }
 
@@ -343,6 +611,19 @@ string CommandHandler::handleSet(const vector<string> &tokens)
     {
         success = table.setPx(key, valVariant, expireMs);
     }
+    else if (expireAtAbsMs > 0)
+    {
+        uint64_t now = FlatTable::getCurrentTimeMs();
+        if (expireAtAbsMs <= now)
+        {
+            table.del(key);
+            success = true;
+        }
+        else
+        {
+            success = table.set(key, valVariant, expireAtAbsMs);
+        }
+    }
     else
     {
         success = table.set(key, valVariant);
@@ -350,10 +631,50 @@ string CommandHandler::handleSet(const vector<string> &tokens)
 
     if (success)
     {
-        return Protocol::formatSimpleString("OK");
+        return returnOld ? oldFormatted : Protocol::formatSimpleString("OK");
     }
 
     return Protocol::formatError("could not store key-value pair");
+}
+
+string CommandHandler::handleSetEx(const vector<string> &tokens)
+{
+    // Sintaxe padrão: SETEX key seconds value (também aceita SETEX key value seconds)
+    if (tokens.size() != 4)
+    {
+        return Protocol::formatError("wrong number of arguments for 'setex' command");
+    }
+
+    int64_t sec = 0;
+    if (parseStrictInt64(tokens[2], sec))
+    {
+        return handleSet({"SET", tokens[1], tokens[3], "EX", to_string(sec)});
+    }
+    if (parseStrictInt64(tokens[3], sec))
+    {
+        return handleSet({"SET", tokens[1], tokens[2], "EX", to_string(sec)});
+    }
+    return Protocol::formatError("value is not an integer or out of range");
+}
+
+string CommandHandler::handlePSetEx(const vector<string> &tokens)
+{
+    // Sintaxe padrão: PSETEX key milliseconds value (também aceita PSETEX key value milliseconds)
+    if (tokens.size() != 4)
+    {
+        return Protocol::formatError("wrong number of arguments for 'psetex' command");
+    }
+
+    int64_t ms = 0;
+    if (parseStrictInt64(tokens[2], ms))
+    {
+        return handleSet({"SET", tokens[1], tokens[3], "PX", to_string(ms)});
+    }
+    if (parseStrictInt64(tokens[3], ms))
+    {
+        return handleSet({"SET", tokens[1], tokens[2], "PX", to_string(ms)});
+    }
+    return Protocol::formatError("value is not an integer or out of range");
 }
 
 string CommandHandler::handleGet(const vector<string> &tokens)
@@ -430,13 +751,17 @@ string CommandHandler::handleExists(const vector<string> &tokens)
 
 string CommandHandler::handleIncr(const vector<string> &tokens)
 {
-    if (tokens.size() != 2)
+    if (tokens.size() == 2)
     {
-        return Protocol::formatError("wrong number of arguments for 'incr' command");
+        vector<string> incrByTokens = {tokens[0], tokens[1], "1"};
+        return handleIncrBy(incrByTokens);
     }
-
-    vector<string> incrByTokens = {tokens[0], tokens[1], "1"};
-    return handleIncrBy(incrByTokens);
+    if (tokens.size() == 3)
+    {
+        vector<string> incrByTokens = {tokens[0], tokens[1], stripOptionBrackets(tokens[2])};
+        return handleIncrBy(incrByTokens);
+    }
+    return Protocol::formatError("wrong number of arguments for 'incr' command");
 }
 
 string CommandHandler::handleIncrBy(const vector<string> &tokens)
@@ -448,11 +773,7 @@ string CommandHandler::handleIncrBy(const vector<string> &tokens)
 
     const string &key = tokens[1];
     int64_t amount = 0;
-    try
-    {
-        amount = stoll(tokens[2]);
-    }
-    catch (...)
+    if (!parseStrictInt64(tokens[2], amount))
     {
         return Protocol::formatError("value is not an integer or out of range");
     }
@@ -514,13 +835,17 @@ string CommandHandler::handleIncrBy(const vector<string> &tokens)
 
 string CommandHandler::handleDecr(const vector<string> &tokens)
 {
-    if (tokens.size() != 2)
+    if (tokens.size() == 2)
     {
-        return Protocol::formatError("wrong number of arguments for 'decr' command");
+        vector<string> decrByTokens = {tokens[0], tokens[1], "1"};
+        return handleDecrBy(decrByTokens);
     }
-
-    vector<string> decrByTokens = {tokens[0], tokens[1], "1"};
-    return handleDecrBy(decrByTokens);
+    if (tokens.size() == 3)
+    {
+        vector<string> decrByTokens = {tokens[0], tokens[1], stripOptionBrackets(tokens[2])};
+        return handleDecrBy(decrByTokens);
+    }
+    return Protocol::formatError("wrong number of arguments for 'decr' command");
 }
 
 string CommandHandler::handleDecrBy(const vector<string> &tokens)
@@ -532,11 +857,7 @@ string CommandHandler::handleDecrBy(const vector<string> &tokens)
 
     const string &key = tokens[1];
     int64_t amount = 0;
-    try
-    {
-        amount = stoll(tokens[2]);
-    }
-    catch (...)
+    if (!parseStrictInt64(tokens[2], amount))
     {
         return Protocol::formatError("value is not an integer or out of range");
     }
@@ -547,19 +868,36 @@ string CommandHandler::handleDecrBy(const vector<string> &tokens)
 
 string CommandHandler::handleExpire(const vector<string> &tokens)
 {
-    if (tokens.size() != 3)
+    // Sintaxe: EXPIRE key seconds [NX | XX | GT | LT]
+    if (tokens.size() < 3 || tokens.size() > 4)
     {
         return Protocol::formatError("wrong number of arguments for 'expire' command");
     }
 
     int64_t seconds = 0;
-    try
-    {
-        seconds = stoll(tokens[2]);
-    }
-    catch (...)
+    if (!parseStrictInt64(tokens[2], seconds))
     {
         return Protocol::formatError("value is not an integer or out of range");
+    }
+
+    string cond;
+    if (tokens.size() == 4)
+    {
+        cond = toUpper(stripOptionBrackets(tokens[3]));
+        if (!isValidExpireCondition(cond))
+        {
+            return Protocol::formatError("Unsupported option " + tokens[3]);
+        }
+        int64_t currentPttl = table.pttl(tokens[1]);
+        if (currentPttl == -2)
+        {
+            return Protocol::formatInteger(0);
+        }
+        int64_t newRemainingMs = (seconds > 0) ? (seconds * 1000) : 0;
+        if (!checkExpireCondition(currentPttl, newRemainingMs, cond))
+        {
+            return Protocol::formatInteger(0);
+        }
     }
 
     bool ok = table.expire(tokens[1], seconds);
@@ -568,22 +906,131 @@ string CommandHandler::handleExpire(const vector<string> &tokens)
 
 string CommandHandler::handlePExpire(const vector<string> &tokens)
 {
-    if (tokens.size() != 3)
+    // Sintaxe: PEXPIRE key milliseconds [NX | XX | GT | LT]
+    if (tokens.size() < 3 || tokens.size() > 4)
     {
         return Protocol::formatError("wrong number of arguments for 'pexpire' command");
     }
 
     int64_t ms = 0;
-    try
-    {
-        ms = stoll(tokens[2]);
-    }
-    catch (...)
+    if (!parseStrictInt64(tokens[2], ms))
     {
         return Protocol::formatError("value is not an integer or out of range");
     }
 
+    string cond;
+    if (tokens.size() == 4)
+    {
+        cond = toUpper(stripOptionBrackets(tokens[3]));
+        if (!isValidExpireCondition(cond))
+        {
+            return Protocol::formatError("Unsupported option " + tokens[3]);
+        }
+        int64_t currentPttl = table.pttl(tokens[1]);
+        if (currentPttl == -2)
+        {
+            return Protocol::formatInteger(0);
+        }
+        int64_t newRemainingMs = (ms > 0) ? ms : 0;
+        if (!checkExpireCondition(currentPttl, newRemainingMs, cond))
+        {
+            return Protocol::formatInteger(0);
+        }
+    }
+
     bool ok = table.pexpire(tokens[1], ms);
+    return Protocol::formatInteger(ok ? 1 : 0);
+}
+
+string CommandHandler::handleExpireAt(const vector<string> &tokens)
+{
+    // Sintaxe: EXPIREAT key unix-time-seconds [NX | XX | GT | LT]
+    if (tokens.size() < 3 || tokens.size() > 4)
+    {
+        return Protocol::formatError("wrong number of arguments for 'expireat' command");
+    }
+
+    int64_t unixSec = 0;
+    if (!parseStrictInt64(tokens[2], unixSec))
+    {
+        return Protocol::formatError("value is not an integer or out of range");
+    }
+
+    if (unixSec <= 0)
+    {
+        bool ok = table.expire(tokens[1], 0);
+        return Protocol::formatInteger(ok ? 1 : 0);
+    }
+
+    string cond;
+    if (tokens.size() == 4)
+    {
+        cond = toUpper(stripOptionBrackets(tokens[3]));
+        if (!isValidExpireCondition(cond))
+        {
+            return Protocol::formatError("Unsupported option " + tokens[3]);
+        }
+        int64_t currentPttl = table.pttl(tokens[1]);
+        if (currentPttl == -2)
+        {
+            return Protocol::formatInteger(0);
+        }
+        uint64_t now = FlatTable::getCurrentTimeMs();
+        uint64_t targetMs = static_cast<uint64_t>(unixSec) * 1000;
+        int64_t newRemainingMs = (targetMs > now) ? static_cast<int64_t>(targetMs - now) : 0;
+        if (!checkExpireCondition(currentPttl, newRemainingMs, cond))
+        {
+            return Protocol::formatInteger(0);
+        }
+    }
+
+    bool ok = table.expireAt(tokens[1], static_cast<uint64_t>(unixSec));
+    return Protocol::formatInteger(ok ? 1 : 0);
+}
+
+string CommandHandler::handlePExpireAt(const vector<string> &tokens)
+{
+    // Sintaxe: PEXPIREAT key unix-time-ms [NX | XX | GT | LT]
+    if (tokens.size() < 3 || tokens.size() > 4)
+    {
+        return Protocol::formatError("wrong number of arguments for 'pexpireat' command");
+    }
+
+    int64_t unixMs = 0;
+    if (!parseStrictInt64(tokens[2], unixMs))
+    {
+        return Protocol::formatError("value is not an integer or out of range");
+    }
+
+    if (unixMs <= 0)
+    {
+        bool ok = table.pexpire(tokens[1], 0);
+        return Protocol::formatInteger(ok ? 1 : 0);
+    }
+
+    string cond;
+    if (tokens.size() == 4)
+    {
+        cond = toUpper(stripOptionBrackets(tokens[3]));
+        if (!isValidExpireCondition(cond))
+        {
+            return Protocol::formatError("Unsupported option " + tokens[3]);
+        }
+        int64_t currentPttl = table.pttl(tokens[1]);
+        if (currentPttl == -2)
+        {
+            return Protocol::formatInteger(0);
+        }
+        uint64_t now = FlatTable::getCurrentTimeMs();
+        uint64_t targetMs = static_cast<uint64_t>(unixMs);
+        int64_t newRemainingMs = (targetMs > now) ? static_cast<int64_t>(targetMs - now) : 0;
+        if (!checkExpireCondition(currentPttl, newRemainingMs, cond))
+        {
+            return Protocol::formatInteger(0);
+        }
+    }
+
+    bool ok = table.pexpireAt(tokens[1], static_cast<uint64_t>(unixMs));
     return Protocol::formatInteger(ok ? 1 : 0);
 }
 
@@ -622,9 +1069,20 @@ string CommandHandler::handlePersist(const vector<string> &tokens)
 
 string CommandHandler::handleRename(const vector<string> &tokens)
 {
-    if (tokens.size() != 3)
+    // Sintaxe: RENAME key newkey [NX]
+    if (tokens.size() < 3 || tokens.size() > 4)
     {
         return Protocol::formatError("wrong number of arguments for 'rename' command");
+    }
+
+    if (tokens.size() == 4)
+    {
+        string opt = toUpper(stripOptionBrackets(tokens[3]));
+        if (opt == "NX")
+        {
+            return handleRenameNx({tokens[0], tokens[1], tokens[2]});
+        }
+        return Protocol::formatError("syntax error in 'rename' command");
     }
 
     bool ok = table.rename(tokens[1], tokens[2], false);
@@ -675,48 +1133,94 @@ string CommandHandler::handleDbSize(const vector<string> &tokens)
 
 string CommandHandler::handleInfo(const vector<string> &tokens)
 {
-    (void)tokens;
     const SlabAllocator &alloc = table.getAllocator();
+    string section = (tokens.size() >= 2) ? toUpper(stripOptionBrackets(tokens[1])) : "ALL";
 
     stringstream ss;
-    ss << "# Storage\r\n";
-    ss << "active_keys:" << table.getActiveCount() << "\r\n";
-    ss << "table_capacity:" << table.getCapacity() << "\r\n";
-    ss << "# Memory\r\n";
-    ss << "slab_block_size:" << alloc.getBlockSize() << "\r\n";
-    ss << "slab_total_blocks:" << alloc.getTotalBlocks() << "\r\n";
-    ss << "slab_allocated_blocks:" << alloc.getAllocatedBlocks() << "\r\n";
-    ss << "slab_free_blocks:" << alloc.getFreeBlocks() << "\r\n";
-    ss << "slab_chunks:" << alloc.getChunkCount() << "\r\n";
+    if (section == "ALL" || section == "DEFAULT" || section == "STORAGE" || section == "KEYSPACE")
+    {
+        ss << "# Storage\r\n";
+        ss << "active_keys:" << table.getActiveCount() << "\r\n";
+        ss << "table_capacity:" << table.getCapacity() << "\r\n";
+    }
+    if (section == "ALL" || section == "DEFAULT" || section == "MEMORY")
+    {
+        ss << "# Memory\r\n";
+        ss << "slab_block_size:" << alloc.getBlockSize() << "\r\n";
+        ss << "slab_total_blocks:" << alloc.getTotalBlocks() << "\r\n";
+        ss << "slab_allocated_blocks:" << alloc.getAllocatedBlocks() << "\r\n";
+        ss << "slab_free_blocks:" << alloc.getFreeBlocks() << "\r\n";
+        ss << "slab_chunks:" << alloc.getChunkCount() << "\r\n";
+    }
 
     return Protocol::formatBulkString(ss.str());
 }
 
 string CommandHandler::handleHelp(const vector<string> &tokens)
 {
-    (void)tokens;
+    if (tokens.size() >= 2)
+    {
+        string target = toUpper(stripOptionBrackets(tokens[1]));
+        if (target == "SET")
+        {
+            return Protocol::formatBulkString(
+                "SET key value [EX seconds | PX milliseconds | EXAT timestamp | PXAT ms-timestamp | KEEPTTL] [NX | XX] [GET]\n"
+                "  Define o valor de uma chave, com suporte a parametros opcionais de expiracao e condicao.");
+        }
+        if (target == "SETEX" || target == "PSETEX")
+        {
+            return Protocol::formatBulkString(
+                "SETEX key seconds value\n"
+                "PSETEX key milliseconds value\n"
+                "  Define o valor e o tempo de expiracao de uma chave atomicamente.");
+        }
+        if (target == "EXPIRE" || target == "PEXPIRE" || target == "EXPIREAT" || target == "PEXPIREAT")
+        {
+            return Protocol::formatBulkString(
+                "EXPIRE key seconds [NX | XX | GT | LT]\n"
+                "PEXPIRE key milliseconds [NX | XX | GT | LT]\n"
+                "EXPIREAT key unix-time-seconds [NX | XX | GT | LT]\n"
+                "PEXPIREAT key unix-time-ms [NX | XX | GT | LT]\n"
+                "  Define o tempo de vida (TTL) de uma chave existente.");
+        }
+        if (target == "INCR" || target == "INCRBY" || target == "DECR" || target == "DECRBY")
+        {
+            return Protocol::formatBulkString(
+                "INCR key [amount]\n"
+                "INCRBY key amount\n"
+                "DECR key [amount]\n"
+                "DECRBY key amount\n"
+                "  Incrementa ou decrementa o valor inteiro de uma chave.");
+        }
+    }
+
     string helpText =
         "Available commands:\n"
         "  PING [message]\n"
-        "  SET key value [EX seconds] [PX ms]\n"
+        "  SET key value [EX seconds] [PX ms] [EXAT timestamp] [PXAT ms-timestamp] [NX | XX] [KEEPTTL] [GET]\n"
+        "  SETEX key seconds value\n"
+        "  PSETEX key milliseconds value\n"
         "  GET key\n"
         "  DEL key [key ...]\n"
         "  EXISTS key [key ...]\n"
-        "  INCR key\n"
+        "  INCR key [amount]\n"
         "  INCRBY key amount\n"
-        "  DECR key\n"
+        "  DECR key [amount]\n"
         "  DECRBY key amount\n"
-        "  EXPIRE key seconds\n"
-        "  PEXPIRE key milliseconds\n"
+        "  EXPIRE key seconds [NX | XX | GT | LT]\n"
+        "  PEXPIRE key milliseconds [NX | XX | GT | LT]\n"
+        "  EXPIREAT key timestamp [NX | XX | GT | LT]\n"
+        "  PEXPIREAT key ms-timestamp [NX | XX | GT | LT]\n"
         "  TTL key\n"
         "  PTTL key\n"
         "  PERSIST key\n"
-        "  RENAME key newkey\n"
+        "  RENAME key newkey [NX]\n"
         "  RENAMENX key newkey\n"
         "  PURGE\n"
         "  DUMP\n"
         "  DBSIZE\n"
-        "  INFO\n"
+        "  INFO [section]\n"
+        "  HELP [command]\n"
         "  QUIT / EXIT";
 
     return Protocol::formatBulkString(helpText);
