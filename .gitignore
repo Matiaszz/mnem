@@ -1,6 +1,10 @@
 engine/cmake-build-debug
 engine/.idea
+engine/build
 .vscode
 engine/out
 build
 enigne/dump.mnem
+engine/dump.mnem
+client/out
+client/build
